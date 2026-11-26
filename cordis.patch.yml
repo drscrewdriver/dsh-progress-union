@@ -1,0 +1,4 @@
+# dsh-progress-union bundle patch: register the host fiber.
+- insert:
+    - id: progress-union
+      name: dsh-progress-union

@@ -1,0 +1,9 @@
+node_modules/
+*.tgz
+.tempscript/
+artifacts/
+.evidence/
+*.log
+.env
+.env.*
+.DS_Store

@@ -1,0 +1,58 @@
+{
+  "name": "dsh-progress-union",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "进度结合原型：dsh-progress-board 槽位真相源 × 鲸程 widget 时间/ETA 引擎，另向压缩插件暴露只读三层进度锚点（service + HTTP 双平面）。基于 l3j3y3/dsh-progress-board (MIT) 与 uuhihj/task-progress-bar dsh-progress-widget (MIT)。",
+  "license": "MIT",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "README.md",
+    "LICENSE",
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "dsh.plugin.json",
+    "icon.svg",
+    "docs/"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "progress-board",
+    "progress-anchor",
+    "compaction"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "file:mine-dsh-plugins/dsh-progress-union"
+  }
+}
