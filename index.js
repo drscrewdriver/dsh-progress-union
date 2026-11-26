@@ -1071,6 +1071,134 @@ export async function apply(ctx, config) {
     return parts.join('\n')
   }
 
+  // —— 续轮驱动器（重试）：idle → followup 带自有 source 的 <progress_goal_round> ——
+  // 每 agent 一个 attempt 状态：queued/claimed/cancelled + 串行 FIFO；官方 driver 的轻量版。
+  const goalDrives = new WeakMap() // agent -> {attempt, requested, run, stopping}
+
+  function driveStateFor(agent) {
+    let s = goalDrives.get(agent)
+    if (!s) {
+      s = { attempt: undefined, requested: false, run: undefined, stopping: false }
+      goalDrives.set(agent, s)
+    }
+    return s
+  }
+
+  function sameGoalSource(message, attempt) {
+    if (!attempt || !message || !message.source) return false
+    const src = message.source
+    return src.kind === GOAL_SOURCE_KIND && src.goalId === attempt.goalId && src.revision === attempt.revision && src.round === attempt.round
+  }
+
+  function isGoalRoundMessage(message) {
+    return Boolean(message && message.source && message.source.kind === GOAL_SOURCE_KIND && message.source.round > 0)
+  }
+
+  // 构造 followup 消息的 content，把板清单与助手轮次草案（若有）拼进去。
+  function renderGoalRoundContent(sessionId, round, view) {
+    const state = states.get(sessionId)
+    const checklist = state ? renderChecklist(state, cfg.observer.maxItems).join('\n') : '(空板)'
+    const parts = [
+      `${GOAL_TAG}`,
+      `Objective: ${JSON.stringify(view.objective)}`,
+      `Round: ${round}/${view.maxRounds}`,
+      '',
+      '<progress-board-snapshot>',
+      checklist,
+      '</progress-board-snapshot>',
+    ]
+    if (oRoundDraftOf(sessionId)) parts.push('', `助手建议：${oRoundDraftOf(sessionId)}`)
+    parts.push(
+      '',
+      '继续在**同一会话**朝目标推进：以当前工作区、工具结果与持久化状态为准，先核对进度板再行动；做出实质进展并验证。',
+      '若要收尾，先确保进度板全部完成，再调用 progress_goal_report 报 status=complete 并给出 evidence。若受阻，报 status=blocked 并写清 blocker。否则报 status=continue，本目标会自动进入下一轮。',
+      '每轮至少用 progress_update 同步一次进度板（无变化传 changes=[]）。',
+      `${GOAL_TAG}`,
+    )
+    return [{ type: 'text', text: parts.join('\n') }]
+  }
+
+  // 助手轮次草案：存在 observers 上，由 Phase3 的辅助 LLM 写入；这里只读。
+  function oRoundDraftOf(sid) {
+    const o = observers.get(sid)
+    return o && typeof o.roundDraft === 'string' && o.roundDraft ? o.roundDraft.slice(0, 400) : ''
+  }
+
+  async function driveGoal(state) {
+    const { agent } = state
+    const sessionId = String(agent.session?.id ?? agent.id)
+    const current = ensureState(sessionId)
+    const g = current.goal
+    // 让路：官方目标 active 时不排队
+    try {
+      const official = ctx.get('goals')?.get?.(agent)
+      if (official && official.phase === 'active' && official.activation === 'armed') return
+    } catch (_err) {}
+    if (g.phase !== 'active' || g.activation !== 'armed') return
+    if (g.roundsStarted >= g.maxRounds) {
+      g.phase = 'blocked'
+      g.activation = 'disarmed'
+      g.blockedReason = `达到预算上限 ${g.maxRounds} 轮`
+      g.blockedStreak = 1
+      g.currentRound = 0
+      await saveGoal(sessionId)
+      return
+    }
+    const round = g.roundsStarted + 1
+    const revision = current.revision
+    const content = renderGoalRoundContent(sessionId, round, goalView(sessionId))
+    const message = {
+      id: `pg-${now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      role: 'user',
+      content,
+      source: { kind: GOAL_SOURCE_KIND, goalId: g.id, revision, round },
+    }
+    // 声称本轮：写 currentRound + roundsStarted，避免重复派发
+    g.currentRound = round
+    g.roundsStarted = round
+    await saveGoal(sessionId)
+    state.attempt = { goalId: g.id, revision, round, messageId: message.id, phase: 'queued', stale: false }
+    try {
+      if (typeof agent.followup !== 'function') throw new Error('agent.followup unavailable')
+      agent.followup(message)
+    } catch (err) {
+      state.attempt = undefined
+      g.phase = 'blocked'
+      g.activation = 'disarmed'
+      g.blockedReason = `续轮派发失败：${err instanceof Error ? err.message : String(err)}`
+      await saveGoal(sessionId)
+    }
+  }
+
+  function requestGoalDrive(agent) {
+    const state = driveStateFor(agent)
+    if (state.stopping) return
+    state.requested = true
+    if (state.run !== undefined) return
+    let run
+    try {
+      run = (async () => {
+        while (state.requested && !state.stopping) {
+          state.requested = false
+          try {
+            await driveGoal(state)
+          } catch (_err) {
+            // 单轮失败静默，不阻断后续
+          }
+        }
+      })()
+    } catch (_err) {
+      state.run = undefined
+      return
+    }
+    state.run = run
+    const retire = () => {
+      state.run = undefined
+      if (state.requested && !state.stopping) requestGoalDrive(agent)
+    }
+    run.then(retire, retire)
+  }
+
   // ==========================================================================
   // B. 注入面（board 三块照板 + 鲸程文件上报协议收敛）
   // ==========================================================================
@@ -1400,14 +1528,38 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     hookedAgents.add(agent)
     try {
       agent.ctx.on('agent/pre-step', async (payload, next) => {
+        const sid = String(agent.session?.id ?? agent.id)
+        const stepMessages = ((payload && payload.messages) || [])
+
+        // /progress-goal 身份栅栏：目标续轮消息必须精确匹配 attempt，否则拒绝本步。
+        const goalRound = stepMessages.find((m) => isGoalRoundMessage(m))
+        if (goalRound) {
+          const ds = driveStateFor(agent)
+          const attempt = ds.attempt
+          const src = goalRound.source
+          const current = states.get(sid)
+          const g = current && current.goal
+          const valid = Boolean(
+            attempt && sameGoalSource(goalRound, attempt) && !attempt.stale &&
+            g && g.id === src.goalId && g.phase === 'active' && g.activation === 'armed' &&
+            src.round === g.roundsStarted && src.round === attempt.round
+          )
+          if (!valid) {
+            if (attempt && attempt.goalId === src.goalId) { attempt.stale = true; ds.attempt = undefined }
+            return { kind: 'reject' }
+          }
+          attempt.phase = 'claimed'
+        }
+
         const decision = await next()
         try {
           if (!cfg.protocolHint) return decision
+          // /progress-goal 续轮消息绝不注入协议消息：避免重蹈 /goal 身份污染覆辙。
+          if (stepMessages.some((m) => isGoalRoundMessage(m))) return decision
           // 单协议收敛：本会话板已启用 → 不再注入文件上报协议。
-          const sid = String(agent.session?.id ?? agent.id)
           if (isEnabled(sid)) return decision
           if (!decision || decision.kind !== 'enter' || !Array.isArray(decision.messages)) return decision
-          const freshUser = ((payload && payload.messages) || []).find((m) => m && m.source && m.source.kind === 'user')
+          const freshUser = stepMessages.find((m) => m && m.source && m.source.kind === 'user')
           if (!freshUser) return decision
           decision.messages.push({
             id: 'dpg-' + now().toString(36) + '-' + Math.random().toString(36).slice(2, 8),
@@ -1724,6 +1876,49 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
   } catch (_err) {}
   for (const agent of agents?.list?.() ?? []) installAgentHook(agent)
 
+  // /progress-goal：任何非本域的新消息进入 inbox 视为用户抢占 → 标记 attempt stale 并暂停目标。
+  try {
+    disposers.push(ctx.on('agent/inbox/inserted', ({ agent, message }) => {
+      if (!agent) return
+      const ds = driveStateFor(agent)
+      const attempt = ds.attempt
+      if (!attempt) return
+      if (sameGoalSource(message, attempt)) return // 自己派发的轮次不算竞争
+      const src = message && message.source
+      if (src && src.kind === GOAL_SOURCE_KIND) return
+      // 用户/他人的新消息 → 抢占：暂停目标，清 attempt（等用户下一次明确 resume 或继续）
+      attempt.stale = true
+      ds.attempt = undefined
+      try {
+        const sid = String(agent.session?.id ?? agent.id)
+        const g = ensureState(sid).goal
+        if (g.phase === 'active') {
+          g.phase = 'paused'
+          g.activation = 'disarmed'
+          g.currentRound = 0
+          void saveGoal(sid)
+        }
+      } catch (_err) {}
+    }))
+    disposers.push(ctx.on('agent/inbox/claimed', ({ agent, message }) => {
+      if (!agent) return
+      const attempt = driveStateFor(agent).attempt
+      if (attempt && sameGoalSource(message, attempt)) attempt.phase = 'claimed'
+    }))
+    disposers.push(ctx.on('agent/inbox/discarded', ({ agent, message }) => {
+      if (!agent) return
+      const attempt = driveStateFor(agent).attempt
+      if (attempt && sameGoalSource(message, attempt)) {
+        attempt.stale = true
+        driveStateFor(agent).attempt = undefined
+      }
+    }))
+    disposers.push(ctx.on('agent/disposed', ({ agent }) => {
+      const ds = goalDrives.get(agent)
+      if (ds) ds.stopping = true
+    }))
+  } catch (_err) {}
+
   disposers.push(ctx.on('session/event', (session, event) => {
     try {
       if (!event) return
@@ -1872,6 +2067,10 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
       if (agent && agent.id && st === 'running') {
         const task = taskMap.get(String(agent.id))
         if (task && task.active) task.lastActivityAt = now()
+      }
+      // /progress-goal 续轮：agent 空载时自动派发下一轮（用户主动消息会抢占 attempt 而停）。
+      if (agent && st === 'idle') {
+        requestGoalDrive(agent)
       }
       // idle 不直接结束任务：maintenance 阶段也报 idle，会误杀进行中任务；结束统一走 sweep。
     }))
