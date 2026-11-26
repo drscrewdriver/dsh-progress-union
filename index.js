@@ -19,6 +19,23 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import z from '@deepseek-ai/schemastery'
+
+// 设置页可见性：宿主 settings.describe() 只看插件导出的 Config（带 .volatile() 的字段
+// 才会生成可编辑表单）。导出它，progress-union 才会出现在「设置 → 插件」里，客户端
+// scopeOf('progress-union') 也才拿得到命名空间做运行时读写。
+export const Config = z.object({
+  assistant: z.object({
+    mode: z.union(['', 'registered', 'direct']).default(''),
+    provider: z.string().default(''),
+    model: z.string().default(''),
+    baseUrl: z.string().default(''),
+    apiKey: z.string().role('secret').default(''),
+    authority: z.union(['slots', 'rounds', 'both']).default('both'),
+    minIntervalMs: z.number().step(1000).min(0).default(90000),
+    autoApply: z.boolean().default(true),
+  }).default({}).volatile(),
+})
 
 // —— 路由与存储标识 ——
 const ROUTE_BASE = '/progress-union'
@@ -54,7 +71,7 @@ const SWEEP_MS = 4000
 const BAD_READ_GRACE_MS = 2000
 
 export const name = 'dsh-progress-union'
-export const inject = ['tools', 'systemPrompt', 'webServer', 'agents']
+export const inject = ['tools', 'systemPrompt', 'webServer', 'agents', 'commands', 'llm', 'settings']
 
 const PROGRESS_POLICY = `## 进度板
 progress_update 维护用户可见的实时进度板。每项含 title/status/percent/current/next/approach/note。
@@ -446,25 +463,41 @@ const DEFAULT_CONFIG = {
     maxTools: 3,
     maxItems: 12,
   },
-  // 辅助 LLM（审查/监视进度）：直连 OpenAI 兼容端点，默认关。只允许改
-  // current/next/percent（命题→校验→落地），不增删任务、不改 title/status。
-  // 宿主通道暂无纯 chat 调用面，故只支持 direct；建议指向本地/局域网自建端点。
+  // 辅助 LLM（审查/监视 + 槽位管理 + 轮次草案）：
+  //   mode: 'registered' 走宿主 llm.stream（选已注册 llm-pi-ai provider/model）；
+  //         'direct' 走自建 OpenAI 兼容端点（baseUrl/apiKey/model）；'' 关。
+  //   authority: 'slots' 可增删改槽位 | 'rounds' 产轮次草案 | 'both'（默认）。
   assistant: {
-    mode: '', // '' 关 | 'direct'
-    baseUrl: '',
-    apiKey: '',
-    model: '',
+    mode: '', // '' 关 | 'registered' | 'direct'
+    provider: '', // registered：llm-pi-ai 里的 provider 名
+    model: '', // registered/direct 共用的模型 id
+    baseUrl: '', // direct
+    apiKey: '', // direct
+    authority: 'both', // slots | rounds | both
     timeoutMs: 20_000,
     minIntervalMs: 90_000,
     maxCallsPerTurn: 1,
+    maxSlotChanges: 8, // 助手单次可改槽位数上限（护栏）
     autoApply: true,
   },
+}
+
+// .volatile() 字段在 0.1.7+ 宿主以 live ref（带 .get()）传入，旧宿主为普通值。
+function readVolatile(value, fallback) {
+  if (value !== null && typeof value === 'object' && typeof value.get === 'function') {
+    const snap = value.get()
+    return snap === undefined ? fallback : snap
+  }
+  return value ?? fallback
 }
 
 export async function apply(ctx, config) {
   const cfg = Object.assign({}, DEFAULT_CONFIG, config && typeof config === 'object' ? config : {})
   cfg.observer = Object.assign({}, DEFAULT_CONFIG.observer, cfg.observer && typeof cfg.observer === 'object' ? cfg.observer : {})
-  cfg.assistant = Object.assign({}, DEFAULT_CONFIG.assistant, cfg.assistant && typeof cfg.assistant === 'object' ? cfg.assistant : {})
+  // assistant 是 volatile 字段：保留原始 ref，每次读取时解包（设置面板改了立即生效）。
+  const assistantRaw = config && typeof config === 'object' ? config.assistant : undefined
+  const unwrappedAssistant = readVolatile(assistantRaw, {})
+  cfg.assistant = Object.assign({}, DEFAULT_CONFIG.assistant, unwrappedAssistant && typeof unwrappedAssistant === 'object' ? unwrappedAssistant : {})
   const now = () => Date.now()
 
   // —— 状态容器 ——
@@ -484,7 +517,35 @@ export async function apply(ctx, config) {
   const tools = ctx.get('tools')
   const agents = ctx.get('agents')
   const commands = ctx.get('commands')
+  const llm = ctx.get('llm')
+  const settings = ctx.get('settings')
   if (!systemPrompt || !tools) throw new Error('dsh-progress-union 需要 systemPrompt 与 tools 服务')
+
+  // settings 命名空间（面板可编辑的辅助 LLM 配置），composition config 作默认值。
+  const ASSISTANT_NS = 'progress-union'
+  function readAssistantSection() {
+    if (!settings) return undefined
+    try {
+      let descriptor
+      if (typeof settings.describe === 'function') {
+        const raw = settings.describe()
+        const list = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.namespaces) ? raw.namespaces : undefined)
+        descriptor = list && list.find((row) => row && row.ns === ASSISTANT_NS)
+        if (descriptor && descriptor.value !== undefined) return { value: descriptor.value, revision: descriptor.revision }
+      }
+      if (typeof settings.get === 'function') {
+        const value = settings.get(ASSISTANT_NS)
+        if (value !== undefined) return { value, revision: undefined }
+      }
+    } catch (_err) {}
+    return undefined
+  }
+  // 运行时配置：settings 里的 assistant 覆盖静态 cfg.assistant（面板改了立即生效）。
+  function liveAssistant() {
+    const section = readAssistantSection()
+    const fromSettings = section && isObject(section.value) && isObject(section.value.assistant) ? section.value.assistant : undefined
+    return fromSettings ? { ...cfg.assistant, ...fromSettings } : cfg.assistant
+  }
 
   // ==========================================================================
   // A. board 核心（fork 语义原样：revision / 409 / 全成全败 / ack / userChanges）
@@ -586,6 +647,21 @@ export async function apply(ctx, config) {
         minIntervalMs: Number(cfg.assistant.minIntervalMs) || 0,
         autoApply: cfg.assistant.autoApply !== false,
       },
+      // 辅助 LLM 的配置回声：只回非机密字段，apiKey 只回布尔
+      assistant: (() => {
+        const a = liveAssistant()
+        return {
+          enabled: assistantReady(),
+          mode: a.mode || '',
+          provider: String(a.provider || ''),
+          baseUrl: String(a.baseUrl || ''),
+          model: String(a.model || ''),
+          hasApiKey: String(a.apiKey || '') !== '',
+          authority: a.authority || 'both',
+          minIntervalMs: Number(a.minIntervalMs) || 0,
+          autoApply: a.autoApply !== false,
+        }
+      })(),
       serverTime: now(),
     }
   }
