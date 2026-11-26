@@ -9,10 +9,14 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
+import { fileURLToPath } from 'node:url'
+
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'union-test-'))
 const { SESSION, createHarness, jsonReq, callRoute } = await import('./harness.mjs')
 
-const clientFile = new URL('../client.js', import.meta.url).pathname.replace(/^\//, '')
+// 必须用 fileURLToPath：`new URL(...).pathname` 在 Windows 得到 `/E:/...`（需去前导斜杠），
+// 但 Linux 的 `/` 是根目录，`.replace(/^[/]/,'')` 会把它变成相对路径 → CI 上 ENOENT。
+const clientFile = fileURLToPath(new URL('../client.js', import.meta.url))
 
 test('client.js 命名空间已切到 union，无 progress-board API 残留', () => {
   const src = fs.readFileSync(clientFile, 'utf8')

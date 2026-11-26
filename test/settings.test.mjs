@@ -11,6 +11,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'union-test-'))
 const { Config } = await import('../index.js')
@@ -66,7 +67,9 @@ test('Config：外层对象不得自己标 volatile（嵌套 volatile 会被宿�
 })
 
 test('客户端：设置卡双座位（settings.section + plugins.bundle.config）且走 configForms 句柄', () => {
-  const file = new URL('../client.js', import.meta.url).pathname.replace(/^\//, '')
+  // fileURLToPath：跨平台取文件路径。`new URL(...).pathname` 在 Linux 上会被
+  // `.replace(/^[/]/,'')` 误伤成相对路径（CI 上 ENOENT，本地 Windows 永不暴露）。
+  const file = fileURLToPath(new URL('../client.js', import.meta.url))
   const src = fs.readFileSync(file, 'utf8')
   assert.match(src, /registerSettingsSeat\('settings\.section'/, '必须注册 settings.section 槽')
   assert.match(src, /id: 'dsh-progress-union'/, '分节 id 必须固定')
