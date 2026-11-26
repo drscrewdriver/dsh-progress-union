@@ -2,6 +2,33 @@
 
 本项目的所有值得记录的变更都写在这里。版本号遵循语义化版本。
 
+## 0.5.0 (2026-11-26)
+
+**plan 文档（spec/tasks/checklist）喂给任务管理 LLM + PTC 通道容错。**
+
+起因：对比 PTC 会话与直调会话，发现「任务文件打勾管理」与「todolist 从任务表转出」都明显弱化。查证后是三个独立缺陷叠成一条链。
+
+- **fix(PTC 容错)**：`applyOneChange` 的 status 支路不再对未知词表抛错。PTC 通道（`run_code` 内 `tools.progress_update`）**不经过工具 JSON Schema**，模型按官方 todo 词表传 `pending` / `in_progress` / `completed` 时会撞上旧版的 `throw new Error('未知状态：pending')`，而 `applyChanges` 是全成全败 —— 一项词表错就让整批 changes 全部丢失（真机会话实测）。
+  - 新增 `normalizeStatus()`：22 个别名归一（`pending→todo`、`in_progress|in-progress|running|wip→doing`、`completed|complete→done`、`waiting|failed|stuck→blocked`），大小写与空格容错。
+  - 归一失败改为**跳过该字段 + 记 warning**，不再整批失败；新增/编辑两支路行为一致。
+  - `applyChanges` 返回值与 `progress_update` 工具 output 新增 `warnings: string[]`，模型下一轮能自己修。
+  - **只对 status 宽容**：`remove` 找不到目标、新增缺 title、`percent` 非数字、歧义 title 仍抛错（那些是真 bug，静默会掩盖）。
+- **fix(PTC 观察者盲区)**：`session/event` 新增 `tool/ptc-dispatch` 分支。PTC 会话里外层 `tool/call` 只有 `run_code`，内层 `shell`/`read`/`edit`（实测单会话 153 条）全在 `ptc-dispatch` 上——旧版观察者的「最近动作」在 PTC 会话里恒为 `run_code`，助手拿不到任何原料。
+  - 只处理终态事件（`dispatch-start` 是起始事件，会重复记）。
+  - `recordTool` 增加同 `name+brief` 连续去重（带 `×N` 计数），PTC 一步几十次同名调用不再挤掉窗口。
+  - 失败的 dispatch 记 `lastToolError`，观察块新增「最近失败：<name> · <消息>」行。
+- **feat(plan 文档接入)**：新增 `planSync` 三档（`off` / **`read`（默认）** / `sync`）与 `plan.*`（`maxFiles` / `maxBytes` / `maxTasks` / `rescanMs` / `echoBack`）。
+  - 扫描 `<session.cwd>/.agents/plans/*/`，按 `tasks.md`/`checklist.md` 的 mtime 取最新计划目录；只有 `spec.md` 的计划不进候选（没勾选表可喂）。
+  - 新增纯解析器 `parseChecklistMarkdown()`（Phase 分组、`- [ ]`/`- [x]` 两态、`t\d+` id 提取、`✅（验证：…；日期）` 证据尾剥离）与 `parseSpecOutline()`（H1–H3 骨架 + 每节首行）。
+  - **观察块**追加一行 `[plan] <slug>：勾选 3/15，当前 Phase 2`（`planSync=off` 时零注入）。
+  - **助手输入**追加 `<plan slug="…" file="tasks.md">` 段：勾选计数 + 各 Phase 进度 + 未完项（带 id）+ spec 大纲 —— 这是「让任务管理 LLM 读 plan 文档细化任务板」的主通道。
+  - `/progress plan <slug>` 显式绑定、`/progress plan off` 解绑（不存在的 slug 报错并列出候选）；不绑定时按 mtime 自动选，多计划并存时可用 `planSlug` 状态钉住。
+  - **`sync` 模式回勾**（默认关）：板项 `done` 且正文命中 tasks.md 中仍为 `- [ ]` 的行 → 改 `- [x]` 并追加 `✅（验证：…；YYYY-MM-DD）`。三层护栏：默认不开、只改仍未被勾选且正文匹配的行、只动勾选态与证据尾（绝不改任务本体）。同一行 10 分钟内不重复回勾。
+- **fix(cwd 取错层)**：实测会话事件里 `cwd` 在 **`session` 顶层**，而旧代码读 `session.header.cwd`（恒空）。修正后 `markLineage`（子会话识别）与 `task.project`（项目名）才真正生效；新增 `sessionCwd()` 三路兜底（header.cwd → session.cwd → workspace）。拿不到 cwd 时静默不扫，不猜 `process.cwd()`。
+- **fix(上报文件误删)**：`readFileTasks` 的 24h 清理改为「仅当文件声明的 session 不在活跃集合里」才删。旧逻辑只看 mtime，会把常驻会话正在用的任务条顶掉。
+- **feat(上报字段)**：`$DSH_HOME/dsh-progress/<sid>.json` 兼容可选 `steps: string[]` 与 `group`（老上报零迁移）。
+- 新增 `test/plan.test.mjs`（15 条：解析器 6 + 目录选择 1 + 端到端 8），全量 `npm test` **79/79** 绿。
+
 ## 0.4.0 (2026-11-26)
 
 **锚点开放 `./anchor` 子路径与订阅面，附消费者指南。**

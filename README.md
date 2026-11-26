@@ -154,6 +154,34 @@ assistant:
 
 **为什么不做 host 通道**：union 自身不直接持有宿主 chat 会话；`registered` 只借 `llm.stream` 一次性调用（不走主对话），`direct` 则完全不依赖宿主内部 API，两路都只拿回一段 JSON，不触碰会话历史。
 
+## plan 文档接入（v0.5.0，默认只读）
+
+让**任务管理 LLM 直接读 codeplan 的四件套**（重点 `tasks.md` / `checklist.md`，`spec.md` 取大纲），用它们细化任务板——板上不再是模型凭空编的几条，而是与你的计划表对齐的粒度。
+
+扫描位置：`<会话 cwd>/.agents/plans/<计划名>/`，多个计划并存时按 `tasks.md` 的 mtime 取最新；只有 `spec.md` 的计划不进候选（没有勾选表可喂）。
+
+| `planSync` | 行为 |
+|---|---|
+| `off` | 完全不读盘，零 token |
+| **`read`**（默认） | 观察块出一行 `[plan] slug：勾选 3/15，当前 Phase 2`；助手输入带 `<plan>` 段（勾选计数 + 各 Phase 进度 + 未完项 + spec 大纲）。**不写任何用户文件** |
+| `sync` | 在 `read` 基础上，板项 `done` 且正文命中 `tasks.md` 中仍为 `- [ ]` 的行 → 回勾成 `- [x]` 并追加 `✅（验证：…；YYYY-MM-DD）` |
+
+**回勾三层护栏**（写用户文件是高风险动作）：
+1. 默认 `read`，`sync` 必须显式开；
+2. 只改「当前仍未被勾选」且正文匹配的行——你改过那一行就不动；
+3. 只动勾选态与证据尾，**绝不改任务本体**（codeplan 铁律）；同一行 10 分钟内不重复回勾。
+
+显式绑定计划目录（多计划共存时避免选错）：
+
+```
+/progress plan manage-session-readonly-star   # 钉住这个计划
+/progress plan off                            # 解绑，回到按 mtime 自动选
+```
+
+绑了一个不存在的 slug 会报错并列出候选，不会悄悄换成别的计划。
+
+**不做**：解析 `findings.md`（codeplan §2 外部内容隔离区，不进上下文）、把 plan 全文塞 systemPrompt（每请求重建会放大 token）。
+
 ## 明确不做
 
 - 不修改上游两仓库；不改 dsh-prime-memory / dsh-spirit / dsh-brief-sidebar / dsh-context-compression-improved 的任何代码。

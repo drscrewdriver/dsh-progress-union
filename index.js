@@ -51,6 +51,18 @@ export const Config = z.object({
     maxReconcileIntervalMs: z.number().step(1000).min(0).default(60000).volatile(),
     mirrorThrottleMs: z.number().step(1).min(0).default(200).volatile(),
   }).default({}),
+  // v0.5.0：plan 文档（.agents/plans/<slug>/{spec,tasks,checklist}.md）喂给任务管理 LLM。
+  //   off  = 完全不读盘
+  //   read = 读 + 解析 + 喂助手 + 板从 tasks.md 细化（默认；只读，不动用户文件）
+  //   sync = read + 板项完成时回勾 tasks.md 的 `- [ ]` → `- [x]`（会写用户文件）
+  planSync: z.union(['off', 'read', 'sync']).default('read').volatile(),
+  plan: z.object({
+    maxFiles: z.number().step(1).min(1).default(3).volatile(),
+    maxBytes: z.number().step(1024).min(4096).default(48 * 1024).volatile(),
+    maxTasks: z.number().step(1).min(1).default(40).volatile(),
+    rescanMs: z.number().step(1000).min(1000).default(5000).volatile(),
+    echoBack: z.boolean().default(true).volatile(),
+  }).default({}),
 })
 
 // —— 路由与存储标识 ——
@@ -75,6 +87,30 @@ const STALE_MS = 10 * 60 * 1000
 const KICKOFF_COOLDOWN_MS = 60 * 1000
 const STATUSES = new Set(BOARD_STATUSES)
 
+// —— v0.5.0：plan 文档（codeplan 的 spec/tasks/checklist）——
+const PLAN_DIR = '.agents/plans'
+const PLAN_FILES = ['tasks.md', 'checklist.md', 'spec.md']
+// 候选目录判定只用勾选类文件：只有 spec.md 的计划还没拆任务，既无可喂也没法回勾。
+const PLAN_CHECK_FILES = ['tasks.md', 'checklist.md']
+// 状态别名归一：PTC 通道（run_code 内 tools.progress_update）**不经过工具 schema**，
+// 模型会按官方 todo 词表传 pending/in_progress/completed——旧版直接抛「未知状态」，
+// 整批 changes 全灭（session-1969 实测）。这里只做词表归一，不猜语义。
+const STATUS_ALIASES = new Map([
+  ['todo', 'todo'], ['pending', 'todo'], ['open', 'todo'], ['not-started', 'todo'],
+  ['doing', 'doing'], ['in_progress', 'doing'], ['in-progress', 'doing'], ['inprogress', 'doing'],
+  ['running', 'doing'], ['active', 'doing'], ['started', 'doing'], ['wip', 'doing'],
+  ['done', 'done'], ['completed', 'done'], ['complete', 'done'], ['finished', 'done'],
+  ['blocked', 'blocked'], ['blocker', 'blocked'], ['failed', 'blocked'], ['error', 'blocked'],
+  ['stuck', 'blocked'], ['waiting', 'blocked'],
+])
+function normalizeStatus(raw) {
+  if (typeof raw !== 'string') return undefined
+  const key = raw.trim().toLowerCase()
+  if (!key) return undefined
+  if (STATUSES.has(key)) return key
+  return STATUS_ALIASES.get(key)
+}
+
 // —— /progress-goal 迷你目标域常量（自建，不复用官方 goals 域）——
 const GOAL_PHASES = new Set(['idle', 'active', 'paused', 'blocked', 'complete'])
 const GOAL_SOURCE_KIND = 'plugin:progress-goal-goal' // producer-owned source kind（身份栅栏用）
@@ -96,6 +132,9 @@ const BAD_READ_GRACE_MS = 2000
 
 export const name = 'dsh-progress-union'
 export const inject = ['tools', 'systemPrompt', 'webServer', 'agents', 'commands', 'llm', 'settings']
+
+// 纯解析函数导出（仅供 test/plan.test.mjs 单测；不在 dsh 契约面上，勿在插件间消费）。
+export { parseChecklistMarkdown, parseSpecOutline, normalizeStatus, planDirCandidates, pickPlanDir }
 
 const PROGRESS_POLICY = `## 进度板
 progress_update 维护用户可见的实时进度板。每项含 title/status/percent/current/next/approach/note。
@@ -177,6 +216,7 @@ function emptyState(sessionId) {
     items: [],
     userChanges: [],
     todoMirror: null, // v0.3.0：自家镜像写入的 hash/at/count，回环识别用
+    planSlug: '', // v0.5.0：显式绑定的 plan 目录名（空=按 mtime 自动选）
     goal: emptyGoal(),
   }
 }
@@ -221,8 +261,185 @@ function summarize(items) {
   }
 }
 
+// ============================================================================
+// v0.5.0：plan 文档解析（codeplan 的 tasks.md / checklist.md / spec.md）
+//   纯函数、不读盘——读盘由 apply 闭包内的 scanPlan 负责，便于单测。
+//   勾选态词表只有两种：[ ] 未完成、[x]/[X] 完成；其余标记（如 [~]）按未完成算，
+//   但记 mark 原文交给上层，避免把模型自造标记当事实。
+// ============================================================================
+
+/**
+ * 解析 tasks.md / checklist.md 的勾选结构。
+ * 产出 { phases: [{ title, tasks: [{ id, text, checked, mark, evidence, line }] }], counts }
+ * 兼容：`## Phase 1: xxx` / `### 分组` / 无标题的裸列表（落到 phase=''）。
+ */
+function parseChecklistMarkdown(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/)
+  const phases = []
+  let current = { title: '', tasks: [] }
+  phases.push(current)
+  // `- [ ] t01 描述` 或 `* [x] 描述`；允许 0–3 层缩进
+  const TASK_RE = /^(\s{0,6})[-*+]\s+\[([^\]]{0,3})\]\s*(.*)$/
+  const HEAD_RE = /^(\s{0,3})(#{2,4})\s+(.+?)\s*$/
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const head = line.match(HEAD_RE)
+    if (head) {
+      const title = head[3].trim()
+      if (title) {
+        current = { title, tasks: [] }
+        phases.push(current)
+      }
+      continue
+    }
+    const m = line.match(TASK_RE)
+    if (!m) continue
+    const mark = String(m[2] || '').trim()
+    let body = String(m[3] || '').trim()
+    if (!body) continue
+    // 任务 id 前缀：t01 / T12 / A3 之类，取出来做稳定键（回勾与去重用）
+    let id = ''
+    const idMatch = body.match(/^([A-Za-z]{1,3}\d{1,3})\s+/)
+    if (idMatch) {
+      id = idMatch[1]
+      body = body.slice(idMatch[0].length).trim()
+    }
+    // 行尾证据：`✅（验证：…；2026-11-26）` / `✅ 证据…`
+    let evidence = ''
+    const evMatch = body.match(/\s*(?:✅|✓)\s*(?:（|\()?\s*(?:验证：)?\s*([^）)]*?)(?:）|\))?\s*$/)
+    if (evMatch && evMatch[0].trim()) {
+      // 只在勾选态成立时把尾巴当证据，避免把正文里的 ✅ 剥掉
+      if (mark.toLowerCase() === 'x') {
+        evidence = evMatch[1].trim().slice(0, 240)
+        body = body.slice(0, evMatch.index).trim()
+      }
+    }
+    current.tasks.push({
+      id,
+      text: body.slice(0, 400),
+      checked: mark.toLowerCase() === 'x',
+      mark,
+      evidence,
+      line: index + 1,
+    })
+  }
+  const out = phases.filter((p) => p.title || p.tasks.length > 0)
+  let total = 0
+  let done = 0
+  for (const p of out) {
+    for (const t of p.tasks) {
+      total += 1
+      if (t.checked) done += 1
+    }
+  }
+  return { phases: out, counts: { total, done, pending: total - done } }
+}
+
+/** spec.md 只取标题骨架（H1/H2 + 每节首行），避免整篇塞进助手输入。 */
+function parseSpecOutline(markdown) {
+  const lines = String(markdown || '').split(/\r?\n/)
+  const sections = []
+  let current = null
+  for (const line of lines) {
+    const head = line.match(/^(#{1,3})\s+(.+?)\s*$/)
+    if (head) {
+      current = { level: head[1].length, title: head[2].trim(), first: '' }
+      sections.push(current)
+      continue
+    }
+    if (current && !current.first) {
+      const t = line.trim()
+      if (t && !t.startsWith('|') && !t.startsWith('>') && !t.startsWith('```')) current.first = t.slice(0, 200)
+    }
+  }
+  return sections.slice(0, 16)
+}
+
+/** 一份 plan 文档的稳定指纹：mtime + size（不含路径——Windows 盘符冒号会污染切分）。 */
+function planFileStamp(file) {
+  try {
+    const st = fs.statSync(file)
+    return { stamp: `${Math.round(st.mtimeMs)}:${st.size}`, mtime: Math.round(st.mtimeMs) }
+  } catch (_err) {
+    return null
+  }
+}
+
+// —— cwd 三路兜底（实测：cwd 在 session 事件**顶层**，不是 header 里）——
+// 原 markLineage / task.project 只读 session.header.cwd，实测恒空，等于一直没生效。
+function sessionCwd(session) {
+  try {
+    if (!session) return ''
+    const hd = session.header && typeof session.header === 'object' ? session.header : null
+    const candidates = [hd && hd.cwd, session.cwd, hd && hd.workspace, session.workspace]
+    for (const value of candidates) {
+      if (typeof value === 'string' && value.trim()) return value.trim()
+    }
+  } catch (_err) {}
+  return ''
+}
+
+/** `<cwd>/.agents/plans` 下的候选计划目录（必须有勾选类文件才算）。 */
+function planDirCandidates(cwd) {
+  if (!cwd) return []
+  const root = path.join(cwd, PLAN_DIR)
+  let names = []
+  try {
+    names = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name)
+  } catch (_err) {
+    return []
+  }
+  const out = []
+  for (const name of names) {
+    const dir = path.join(root, name)
+    // 只有 spec.md 的计划（还没拆任务）不能当候选：没有勾选表可喂，也没法回勾。
+    // 锚点判断用 tasks.md → checklist.md 的顺序（codeplan 里 tasks 是任务分解，优先）。
+    let info = null
+    for (const f of PLAN_CHECK_FILES) {
+      info = planFileStamp(path.join(dir, f))
+      if (info) break
+    }
+    if (!info) continue
+    out.push({ slug: name, dir, stamp: info.stamp, mtime: info.mtime })
+  }
+  return out.sort((a, b) => b.mtime - a.mtime)
+}
+
+/** 选计划目录：显式 slug 优先（必须存在），否则 mtime 最新。 */
+function pickPlanDir(cwd, preferredSlug) {
+  const list = planDirCandidates(cwd)
+  if (!list.length) return null
+  const want = String(preferredSlug || '').trim()
+  if (want) {
+    const hit = list.find((x) => x.slug === want)
+    if (hit) return hit
+    return null // 显式绑了但目录没了：宁可不喂，也不悄悄换成别的计划
+  }
+  return list[0]
+}
+
+function readCapped(file, maxBytes) {
+  try {
+    const st = fs.statSync(file)
+    if (!st.isFile() || st.size <= 0) return ''
+    const cap = Math.max(4096, Number(maxBytes) || 48 * 1024)
+    if (st.size <= cap) return readJsonText(file)
+    // 超大文件只读前 cap 字节（勾选表头通常在前部；截断由上层标注）
+    const fd = fs.openSync(file, 'r')
+    try {
+      const buf = Buffer.alloc(cap)
+      const read = fs.readSync(fd, buf, 0, cap, 0)
+      return buf.subarray(0, read).toString('utf8')
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch (_err) {
+    return ''
+  }
+}
+
 // —— v0.3.0：板 → 官方 todo 的纯映射（content 唯一非空、in_progress ≤1）——
-function boardToTodos(state, maxItems) {
+function boardToTodos(state, maxItems, opts) {
   const limit = Math.max(1, Number(maxItems) || 12)
   const items = (Array.isArray(state && state.items) ? state.items : [])
     .slice()
@@ -231,6 +448,8 @@ function boardToTodos(state, maxItems) {
   const todos = []
   const seen = new Set()
   let doingSeen = false
+  // v0.5.0：rich 模式把 group / percent 一并带出（任务表转出的步骤细节不再被削平）。
+  const rich = Boolean(opts && opts.rich)
   for (const item of items) {
     const content = String(item && item.title || '').trim()
     if (!content || seen.has(content)) continue
@@ -240,7 +459,13 @@ function boardToTodos(state, maxItems) {
     else if (item.status === 'doing') {
       if (!doingSeen) { status = 'in_progress'; doingSeen = true }
     }
-    todos.push({ content, status })
+    const todo = { content, status }
+    if (rich) {
+      if (item.group) todo.group = String(item.group)
+      if (typeof item.percent === 'number') todo.percent = item.percent
+      if (item.status === 'blocked') todo.blocked = true
+    }
+    todos.push(todo)
   }
   return todos
 }
@@ -352,6 +577,10 @@ function parseProgressFile(file, key) {
   try {
     const parsed = JSON.parse(readJsonText(file))
     if (parsed && typeof parsed === 'object' && typeof parsed.task === 'string' && Array.isArray(parsed.stages)) {
+      // v0.5.0：可选 steps（步骤名数组，与 stages 同义但更贴近任务表）与 group 透传，
+      // 供迷你条按步骤渲染；老上报没有这两个字段时保持原形状，零迁移成本。
+      if (!Array.isArray(parsed.steps) && Array.isArray(parsed.stages)) parsed.steps = parsed.stages
+      if (typeof parsed.group !== 'string') parsed.group = ''
       lastGoodByKey.set(key, parsed)
       lastGoodAt = Date.now()
       return parsed
@@ -368,8 +597,11 @@ function parseProgressFile(file, key) {
 }
 
 // 鲸程兼容层：读 $DSH_HOME/dsh-progress/<sid>.json 上报（板关闭时的增强层）。
-function readFileTasks() {
+// activeSids：调用方传入的活跃会话集合（本函数在模块级，不能直接引用 apply 闭包里的
+// states/taskMap——那次越界引用会让 /dsh-progress/status 整条路由抛错）。
+function readFileTasks(activeSids) {
   const out = []
+  const active = activeSids instanceof Set ? activeSids : new Set()
   let names = []
   try {
     names = fs.readdirSync(PROGRESS_DIR).filter((n) => n.endsWith('.json'))
@@ -382,14 +614,20 @@ function readFileTasks() {
     if (parsed) out.push({ ...parsed, reportId: parsed.session ? String(parsed.session) : name.replace(/\.json$/, ''), source: 'dir' })
   }
   // 24 小时未更新的分文件顺手清理（活跃会话个位数，逐次 stat 可忽略）
+  // v0.5.0 修正：**不得删掉还在跑的会话的上报文件**。旧逻辑只看 mtime，把「常驻
+  // 会话超过 24h 没更新进度文件」与「过期垃圾」混为一谈——那次清理会直接顶掉
+  // 用户正看着的任务条。现在只有「文件里声明的 session 不在活跃集合里」才允许删。
   for (const name of names) {
     const full = path.join(PROGRESS_DIR, name)
     try {
       const st = fs.statSync(full)
-      if (Date.now() - st.mtimeMs > PROGRESS_DIR_KEEP_MS) {
-        fs.unlinkSync(full)
-        lastGoodByKey.delete(full)
-      }
+      if (Date.now() - st.mtimeMs <= PROGRESS_DIR_KEEP_MS) continue
+      const parsed = parseProgressFile(full, full)
+      const declared = parsed && parsed.session ? String(parsed.session) : ''
+      const stem = name.replace(/\.json$/, '')
+      if ((declared && active.has(declared)) || active.has(stem)) continue
+      fs.unlinkSync(full)
+      lastGoodByKey.delete(full)
     } catch (_err) {}
   }
   const legacy = parseProgressFile(PROGRESS_FILE, PROGRESS_FILE)
@@ -578,6 +816,18 @@ const DEFAULT_CONFIG = {
   // v0.3.0：板 → 官方 todo 镜像与冲突裁决。默认 reconcile；不想要行为变更可在设置页关。
   todoSync: 'reconcile', // off | mirror | reconcile
   todo: { maxReconcileIntervalMs: 60_000, mirrorThrottleMs: 200 },
+  // v0.5.0：plan 文档（codeplan 的 spec/tasks/checklist）喂给任务管理 LLM。
+  //   off  = 完全不读盘
+  //   read = 读 + 解析 + 喂助手 + 观察块摘要（默认；只读，不动用户文件）
+  //   sync = read + 板项完成时回勾 tasks.md（会写用户文件，需用户显式开启）
+  planSync: 'read', // off | read | sync
+  plan: {
+    maxFiles: 3,
+    maxBytes: 48 * 1024,
+    maxTasks: 40,
+    rescanMs: 5000,
+    echoBack: true,
+  },
   // 辅助 LLM（审查/监视 + 槽位管理 + 轮次草案）：
   //   mode: 'registered' 走宿主 llm.stream（选已注册 llm-pi-ai provider/model）；
   //         'direct' 走自建 OpenAI 兼容端点（baseUrl/apiKey/model）；'' 关。
@@ -668,6 +918,26 @@ export async function apply(ctx, config) {
     return out
   }
   Object.defineProperty(cfg, 'todo', { get: todoNow, configurable: true, enumerable: true })
+
+  // v0.5.0：planSync / plan.* 同样逐叶子解包（设置页改完立即生效）。
+  const planSyncRaw = config && typeof config === 'object' ? config.planSync : undefined
+  Object.defineProperty(cfg, 'planSync', {
+    get: () => readVolatile(planSyncRaw, DEFAULT_CONFIG.planSync),
+    configurable: true, enumerable: true,
+  })
+  const planRaw = config && typeof config === 'object' ? config.plan : undefined
+  function planNow() {
+    const base = DEFAULT_CONFIG.plan
+    const raw = unwrapLive(planRaw)
+    if (!isObject(raw)) return { ...base }
+    const out = { ...base }
+    for (const key of Object.keys(base)) {
+      const v = unwrapLive(raw[key])
+      if (v !== undefined) out[key] = v
+    }
+    return out
+  }
+  Object.defineProperty(cfg, 'plan', { get: planNow, configurable: true, enumerable: true })
   const now = () => Date.now()
 
   // —— 状态容器 ——
@@ -1036,7 +1306,7 @@ export async function apply(ctx, config) {
     return undefined
   }
 
-  function applyOneChange(state, change, origin, at, records) {
+  function applyOneChange(state, change, origin, at, records, warnings) {
     if (!isObject(change)) throw new Error('changes 的每一项必须是对象')
     const remove = change.remove === true
     const existing = findItem(state, change)
@@ -1057,7 +1327,13 @@ export async function apply(ctx, config) {
       if (state.items.length >= MAX_ITEMS) throw new Error(`任务数量已达到上限 ${MAX_ITEMS}`)
       const title = text(change.title, MAX_TITLE)
       if (!title) throw new Error('任务标题不能为空')
-      const status = STATUSES.has(change.status) ? change.status : 'todo'
+      // 新增分支同样吃别名（PTC 词表 pending/in_progress/completed）；无法识别时
+      // 落默认 todo 并回 warning——与编辑分支的宽容策略保持一致。
+      const statusRaw = normalizeStatus(change.status)
+      if (typeof change.status === 'string' && statusRaw === undefined) {
+        warnings.push(`status "${change.status}" 无法识别（已按 todo 处理，合法值 todo|doing|done|blocked）`)
+      }
+      const status = statusRaw ?? 'todo'
       const percent = status === 'done' ? 100 : Math.max(0, Math.min(100, Math.round(finiteNumber(change.percent) ?? 0)))
       const item = {
         id: newItemId(),
@@ -1100,12 +1376,21 @@ export async function apply(ctx, config) {
     }
 
     if (typeof change.status === 'string') {
-      if (!STATUSES.has(change.status)) throw new Error(`未知状态：${change.status}`)
-      record('status', existing.status, change.status)
-      existing.status = change.status
-      if (change.status === 'done') {
-        record('percent', existing.percent, 100)
-        existing.percent = 100
+      // PTC 通道（run_code 内 tools.progress_update）绕过工具 JSON Schema，模型会按
+      // 官方 todo 词表传 pending/in_progress/completed。词表归一；归一失败只跳过该
+      // 字段并记 warning——不为了一个词表错就让整批 changes 全灭（会话 1969 实测）。
+      // 注意：这里**只对 status 宽容**。remove 找不到目标、新增缺 title、percent 非
+      // 数字仍抛错——那些是真 bug，静默会掩盖。
+      const normalized = normalizeStatus(change.status)
+      if (normalized === undefined) {
+        warnings.push(`status "${change.status}" 无法识别（已忽略，合法值 todo|doing|done|blocked）`)
+      } else {
+        record('status', existing.status, normalized)
+        existing.status = normalized
+        if (normalized === 'done') {
+          record('percent', existing.percent, 100)
+          existing.percent = 100
+        }
       }
     }
 
@@ -1172,8 +1457,9 @@ export async function apply(ctx, config) {
     // 变成重复或半应用任务（board 原教训，原样保留）。
     const working = clone(state)
     const records = []
+    const warnings = []
     const at = now()
-    for (const change of changes) applyOneChange(working, change, origin, at, records)
+    for (const change of changes) applyOneChange(working, change, origin, at, records, warnings)
 
     let revisionChanged = false
     if (records.length > 0) {
@@ -1212,6 +1498,10 @@ export async function apply(ctx, config) {
       if (revisionChanged) notifyAnchor(sessionId, working.revision)
       // 唯一写板入口：持久化之后调度 todo 镜像（200ms 去抖，off 时直接返回）。
       if (revisionChanged) scheduleTodoMirror(sessionId)
+      // v0.5.0：sync 模式下把已完成的项回勾到 tasks.md（默认 read 时内部直接返回 0）。
+      if (revisionChanged) {
+        try { maybeEchoBack(sessionId) } catch (_err) {}
+      }
     }
     // 任何 agent 调用（含 changes=[] 确认）都算一次"模型已看板"：重置催办计时；
     // 观察者自己的 autoSync（origin='observer'）只刷新板新鲜度，不抵消模型催办。
@@ -1226,7 +1516,7 @@ export async function apply(ctx, config) {
         fields: record.fields.map((field) => field.field),
       }
     })
-    return { snapshot: publicSnapshot(working), changed: changed.filter(Boolean) }
+    return { snapshot: publicSnapshot(working), changed: changed.filter(Boolean), warnings }
   }
 
   // ==========================================================================
@@ -1620,8 +1910,17 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     if (typeof d.name !== 'string' || !d.name) return
     const o = obsOf(sid)
     const at = now()
-    o.tools.push({ at, name: d.name, brief: briefArgs(d.arguments) })
-    if (o.tools.length > 8) o.tools.splice(0, o.tools.length - 8)
+    const brief = briefArgs(d.arguments)
+    // PTC 一步可能派发几十条同名工具（实测某会话单会话 86 次 shell），全量 push 会把
+    // 真实动作挤出 o.tools 窗口。同 name+brief 与末条相同时只推进时间戳。
+    const last = o.tools[o.tools.length - 1]
+    if (last && last.name === d.name && last.brief === brief) {
+      last.at = at
+      last.count = (last.count || 1) + 1
+    } else {
+      o.tools.push({ at, name: d.name, brief, count: 1 })
+      if (o.tools.length > 8) o.tools.splice(0, o.tools.length - 8)
+    }
     // 文件改动（事实级）：任何带路径类参数的工具调用都记一笔，同路径去重留最新
     const file = filePathOf(d.arguments)
     if (file) {
@@ -1785,6 +2084,7 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     o.lastAssistantAt = at
     const lastOutput = o.outputs[o.outputs.length - 1]
     const files = Array.isArray(o.files) ? o.files.slice(-4).map((f) => f.path) : []
+    const planText = planBrief(sid)
     const lines = [
       `目标：${state.goal && state.goal.phase === 'active' ? JSON.stringify(state.goal.objective) : '(无)'}`,
       ...renderChecklist(state, cfg.observer.maxItems),
@@ -1792,6 +2092,8 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
       o.tools.length ? `最近动作：${o.tools.slice(-cfg.observer.maxTools).map((x) => x.name).join(' → ')}` : '最近动作：—',
       files.length ? `最近改动：${files.join(' · ')}` : '最近改动：—',
     ]
+    // plan 文档是**助手细化板的主原料**：用户明确要求让任务管理 LLM 读 spec/tasks/checklist。
+    if (planText) lines.push(planText)
     try {
       const raw = await callAssistant({ system: ASSISTANT_SYSTEM, user: lines.join('\n'), a })
       const proposal = parseProposal(raw)
@@ -1828,6 +2130,156 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     return lines
   }
 
+  // ==========================================================================
+  // B3. plan 文档（codeplan 的 spec/tasks/checklist）→ 助手的任务细化原料
+  //     实测要点（findings.md §4）：cwd 在 session **顶层**；宿主 todo 只认
+  //     content+status 两个字段；设置页不会自动渲染新叶子。
+  // ==========================================================================
+
+  const planCache = new Map() // sessionId → { stamp, slug, at, data }
+  // session/event 里拿到的 cwd 缓存：事件流的 session 对象一定带顶层 cwd，比
+  // agent.session 可靠（后者在测试基座/旧宿主上可能没有 cwd，甚至拿不到 agent）。
+  const cwdBySession = new Map()
+
+  /** 扫描并缓存当前会话的 plan 文档。cwd 拿不到时返回 null（不猜 process.cwd()）。 */
+  function scanPlan(sid) {
+    if (String(cfg.planSync || 'off') === 'off') return null
+    let cwd = cwdBySession.get(sid) || ''
+    if (!cwd) {
+      const agent = agentOfSession.get(sid)
+      cwd = sessionCwd(agent && agent.session)
+      if (cwd) cwdBySession.set(sid, cwd)
+    }
+    if (!cwd) return null
+    const state = states.get(sid)
+    const preferred = state ? String(state.planSlug || '') : ''
+    const hit = pickPlanDir(cwd, preferred)
+    if (!hit) {
+      planCache.delete(sid)
+      return null
+    }
+    const at = now()
+    const cached = planCache.get(sid)
+    const rescanMs = Math.max(1000, Number(cfg.plan.rescanMs) || 5000)
+    if (cached && cached.stamp === hit.stamp && cached.slug === hit.slug && at - cached.at < rescanMs) return cached.data
+
+    const maxBytes = Math.max(4096, Number(cfg.plan.maxBytes) || 48 * 1024)
+    const checkFile = PLAN_CHECK_FILES.find((f) => planFileStamp(path.join(hit.dir, f)))
+    const markdown = checkFile ? readCapped(path.join(hit.dir, checkFile), maxBytes) : ''
+    const parsed = parseChecklistMarkdown(markdown)
+    const specRaw = readCapped(path.join(hit.dir, 'spec.md'), maxBytes)
+    const data = {
+      slug: hit.slug,
+      dir: hit.dir,
+      file: checkFile || '',
+      truncated: Boolean(checkFile) && markdown.length >= maxBytes,
+      phases: parsed.phases.filter((p) => p.title || p.tasks.length),
+      counts: parsed.counts,
+      spec: parseSpecOutline(specRaw),
+    }
+    planCache.set(sid, { stamp: hit.stamp, slug: hit.slug, at, data })
+    return data
+  }
+
+  /** 助手输入里的 <plan> 段：勾选计数 + 各 Phase 进度 + 未完项 + spec 大纲。 */
+  function planBrief(sid) {
+    const p = scanPlan(sid)
+    if (!p || p.counts.total === 0) return ''
+    const lines = [`<plan slug="${p.slug}" file="${p.file}">`]
+    lines.push(`勾选：${p.counts.done}/${p.counts.total}（${p.counts.pending} 未完成）${p.truncated ? '（文件已截断，仅前 48KB）' : ''}`)
+    for (const phase of p.phases.slice(0, 8)) {
+      if (!phase.title) continue
+      const total = phase.tasks.length
+      if (!total) continue
+      const done = phase.tasks.filter((t) => t.checked).length
+      lines.push(`${phase.title} ${done}/${total}`)
+    }
+    const pending = []
+    for (const phase of p.phases) {
+      for (const t of phase.tasks) {
+        if (t.checked) continue
+        pending.push(`${t.id ? t.id + ' ' : ''}${t.text.slice(0, 80)}`)
+        if (pending.length >= 8) break
+      }
+      if (pending.length >= 8) break
+    }
+    if (pending.length) lines.push(`未完：${pending.join(' · ')}`)
+    if (p.spec.length) lines.push(`spec 大纲：${p.spec.slice(0, 8).map((s) => s.title).join(' / ')}`)
+    lines.push('</plan>')
+    return lines.join('\n')
+  }
+
+  /** 观察块的一行摘要（给主模型看，不占助手配额）。 */
+  function planLine(sid) {
+    const p = scanPlan(sid)
+    if (!p || p.counts.total === 0) return ''
+    const doing = p.phases.find((ph) => ph.tasks.some((t) => !t.checked))
+    const phase = doing && doing.title ? `，当前 ${doing.title}` : ''
+    return `[plan] ${p.slug}：勾选 ${p.counts.done}/${p.counts.total}${phase}${p.truncated ? '（已截断）' : ''}`
+  }
+
+  // ==========================================================================
+  // B4. 回勾（planSync='sync' 才启用）：板项 done → tasks.md 的 `- [ ]` → `- [x]`
+  //     写用户文件是高风险动作，护栏三层：
+  //       ① 默认 planSync='read'，sync 必须用户显式开；
+  //       ② 只改「当前仍未被勾选」且正文匹配的行；用户改过就不动；
+  //       ③ 只改勾选态 + 追加 ✅ 证据，绝不改任务本体（codeplan 铁律）。
+  // ==========================================================================
+
+  const echoedKeys = new Map() // `${sid}:${slug}:${line}:${title}` → at，防重复回勾
+
+  /** 把板里已 done 且能命中 plan 未勾项的任务，回勾到文件。返回改动条数。 */
+  function maybeEchoBack(sid) {
+    if (String(cfg.planSync || '') !== 'sync') return 0
+    const p = scanPlan(sid)
+    if (!p || !p.file || p.counts.pending === 0) return 0
+    const state = states.get(sid)
+    if (!state) return 0
+    const doneItems = state.items.filter((item) => item.status === 'done')
+    if (!doneItems.length) return 0
+    let text = ''
+    try {
+      text = fs.readFileSync(path.join(p.dir, p.file), 'utf8')
+    } catch (_err) {
+      return 0
+    }
+    const eol = text.includes('\r\n') ? '\r\n' : '\n'
+    const lines = text.split(/\r?\n/)
+    const today = new Date().toISOString().slice(0, 10)
+    const TASK_RE = /^(\s{0,6}[-*+]\s+)\[([ xX])\]\s*(.*)$/
+    let changed = 0
+    for (const item of doneItems) {
+      const title = String(item.title || '').trim()
+      if (!title) continue
+      // 命中规则：行仍未被勾选，且正文包含板项标题。不命中就跳过（不猜 id 前缀）。
+      let target = -1
+      for (let i = 0; i < lines.length; i += 1) {
+        const m = lines[i].match(TASK_RE)
+        if (!m || String(m[2]).toLowerCase() === 'x') continue
+        if (String(m[3] || '').includes(title)) { target = i; break }
+      }
+      if (target < 0) continue
+      const key = `${sid}:${p.slug}:${target}:${title.slice(0, 40)}`
+      const last = echoedKeys.get(key)
+      if (last && now() - last < 10 * 60 * 1000) continue
+      const m = lines[target].match(TASK_RE)
+      if (!m) continue
+      const evidence = String(item.current || item.next || '板已完成').replace(/\s+/g, ' ').slice(0, 120)
+      lines[target] = `${m[1]}[x] ${String(m[3]).replace(/\s*✅.*$/, '').trim()} ✅（验证：${evidence}；${today}）`
+      echoedKeys.set(key, now())
+      changed += 1
+    }
+    if (changed > 0) {
+      try {
+        fs.writeFileSync(path.join(p.dir, p.file), lines.join(eol), 'utf8')
+        planCache.delete(sid) // 文件已变，下次重扫
+      } catch (_err) {
+        return 0
+      }
+    }
+    return changed
+  }
+
   /**
    * 观察块：每请求重建（systemPrompt.context），不进历史累积。
    * = 清单（checklist）+ 官方 todo 进度 + 最近输出 + 最近动作 +（滞后时）催办。
@@ -1859,7 +2311,8 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     const lastOutput = o.outputs[o.outputs.length - 1]
     if (lastOutput) lines.push(`最近输出：「${lastOutput.text}」`)
     const tools = o.tools.slice(-cfg.observer.maxTools)
-    if (tools.length) lines.push(`最近动作：${tools.map((x) => x.name).join(' → ')}`)
+    if (tools.length) lines.push(`最近动作：${tools.map((x) => (x.count > 1 ? `${x.name}×${x.count}` : x.name)).join(' → ')}`)
+    if (o.lastToolError) lines.push(`最近失败：${o.lastToolError.name}${o.lastToolError.message ? ' · ' + o.lastToolError.message : ''}`)
     const synced = o.stepsSinceModel > 0 ? `${o.stepsSinceModel} 步前` : '本回合'
     const late = modelIsLate(sid, at)
     if (late) {
@@ -1869,6 +2322,8 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     if (o.assistantNote) lines.push(`助手审查：${o.assistantNote}`)
     if (o.roundDraft) lines.push(`助手轮次草案（仅供参考）：${o.roundDraft}`)
     if (o.assistantError) lines.push(`助手审查失败：${o.assistantError}（仅影响审查建议，不阻断主流程）`)
+    const planRow = planLine(sid)
+    if (planRow) lines.push(planRow)
     return `<progress-observer revision="${state.revision}" synced="${synced}">\n${lines.join('\n')}\n</progress-observer>`
   }
 
@@ -1946,12 +2401,16 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
   }
 
   // 子智能体识别：delegationDepth>0 即子会话；parentSession 存在才采用，拿不到不硬猜。
+  // 注意：这些字段在现行宿主上位于 session **顶层**（实测见 findings.md §4 t01），
+  // header 只是兼容兜底——旧代码只读 header，导致 isSub/parentId 一直没生效。
   function markLineage(task, session) {
     try {
-      const hd = session && session.header
-      if (!hd || !task) return
-      if (typeof hd.delegationDepth === 'number' && hd.delegationDepth > 0) task.isSub = true
-      if (task.isSub && hd.parentSession) task.parentId = String(hd.parentSession)
+      if (!session || !task) return
+      const hd = session.header && typeof session.header === 'object' ? session.header : {}
+      const depth = typeof session.delegationDepth === 'number' ? session.delegationDepth : hd.delegationDepth
+      if (typeof depth === 'number' && depth > 0) task.isSub = true
+      const parent = session.parentSession || hd.parentSession
+      if (task.isSub && parent) task.parentId = String(parent)
     } catch (_err) {}
   }
 
@@ -2169,7 +2628,7 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     }
     // 鲸程兼容层：board 关闭的会话若有文件上报任务，合并/独立成条（blocked 也要显示）。
     const reportsByKey = new Map()
-    for (const rep of readFileTasks()) {
+    for (const rep of readFileTasks(new Set([...states.keys(), ...taskMap.keys()]))) {
       const key = String(rep.reportId || 'legacy')
       const prev = reportsByKey.get(key)
       if (!prev || (Number(rep.updatedAt) || 0) >= (Number(prev.updatedAt) || 0)) reportsByKey.set(key, rep)
@@ -2285,9 +2744,33 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
       if (!event) return
       const sid = session && session.id ? String(session.id) : 'default'
       const type = event.type
+      // plan 扫描的 cwd 来源：会话事件流里的 session 对象（顶层带 cwd）。只记一次。
+      if (!cwdBySession.has(sid)) {
+        const c = sessionCwd(session)
+        if (c) cwdBySession.set(sid, c)
+      }
       // 观察者原料：最近输出（assistant/message）与最近动作（tool/call）都是会话事实
       if (type === 'tool/call') {
         recordTool(sid, event.data)
+        return
+      }
+      // PTC（run_code 内 tools.*）的内层调用落在 ptc-dispatch：外层 tool/call 只有
+      // run_code。不接这里，观察者的「最近动作」在 PTC 会话里恒为 run_code，
+      // 助手拿不到原料——这是「todolist 步骤弱化」的机械原因（实测 153 条）。
+      if (type === 'tool/ptc-dispatch') {
+        const dd = event.data || {}
+        // 只记完成的 dispatch（有 isError 字段才代表终态）；dispatch-start 是起始事件，
+        // 同一条会在终态再记一次，重复记会把窗口挤满。
+        if (Object.prototype.hasOwnProperty.call(dd, 'isError')) {
+          recordTool(sid, dd)
+          if (dd.isError) {
+            const o = obsOf(sid)
+            o.lastToolError = { name: String(dd.name || ''), at: now() }
+            o.lastToolError.message = String(
+              (Array.isArray(dd.content) ? (dd.content.find((b) => b && b.type === 'text') || {}).text : '') || '',
+            ).slice(0, 160)
+          }
+        }
         return
       }
       if (type === 'assistant/message') {
@@ -2383,7 +2866,9 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
           if (task.isSub && pendingText) task.subTitled = true
           task.project = ''
           try {
-            const cwd = session && session.header && session.header.cwd ? String(session.header.cwd) : ''
+            // 实测：cwd 在 session 事件**顶层**（见 findings.md §4 t01）；旧代码只读
+            // session.header.cwd，在现行宿主上恒空 → 项目名一直是空串。
+            const cwd = sessionCwd(session)
             if (cwd) task.project = path.basename(cwd)
           } catch (_err) {}
         } else {
@@ -2878,6 +3363,7 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
               revision: { type: 'number' },
               summary: { type: 'object', additionalProperties: true },
               changed: { type: 'array', items: { type: 'object', additionalProperties: true } },
+              warnings: { type: 'array', items: { type: 'string' } },
             },
           },
           render(_args, value) {
@@ -2905,6 +3391,8 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
             agentSeenRevision: result.snapshot.agentSeenRevision,
             summary: result.snapshot.summary,
             changed: result.changed,
+            // PTC 通道绕过 schema，坏词表/坏字段在这里回声，模型下一轮能自己修。
+            warnings: result.warnings,
             inFlight: anchor.board.inFlight.slice(0, 6),
             time: {
               steps: anchor.time.steps,
@@ -2924,11 +3412,38 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
       () =>
         commands.register({
           name: 'progress',
-          description: '启用/关闭进度板工具（默认不加载，避免 token 开销）',
-          input: { hint: '[on|off]' },
+          description: '启用/关闭进度板工具；`plan <slug>` 绑定 plan 文档，`plan off` 解绑',
+          input: { hint: '[on|off|plan <slug>|plan off]' },
           handler: ({ agent, rawInput }) => {
             const sessionId = sessionOfAgent(agent)
-            const mode = String(rawInput || '').trim().toLowerCase()
+            const raw = String(rawInput || '').trim()
+            const mode = raw.toLowerCase()
+            // /progress plan <slug> | /progress plan off —— plan 文档显式绑定
+            if (mode === 'plan' || mode.startsWith('plan ')) {
+              const state = ensureState(sessionId)
+              const arg = raw.slice(4).trim()
+              if (!arg || arg.toLowerCase() === 'off') {
+                state.planSlug = ''
+                void persist(sessionId)
+                planCache.delete(sessionId)
+                return { kind: 'success', text: 'plan 文档已解绑；恢复按 mtime 自动选最新计划目录。' }
+              }
+              const cwd = sessionCwd(agent && agent.session)
+              if (!cwd) {
+                return { kind: 'error', text: '拿不到本会话 cwd，无法校验 plan 目录（宿主版本可能未暴露 session.cwd）。' }
+              }
+              const list = planDirCandidates(cwd).map((x) => x.slug)
+              if (!list.includes(arg)) {
+                return {
+                  kind: 'error',
+                  text: `找不到计划 "${arg}"（需含 tasks.md 或 checklist.md）。可用：${list.slice(0, 5).join('、') || '(无)'}`,
+                }
+              }
+              state.planSlug = arg
+              void persist(sessionId)
+              planCache.delete(sessionId)
+              return { kind: 'success', text: `plan 文档已绑定到 "${arg}"；观察块与助手输入将读取它的 tasks/checklist/spec。` }
+            }
             if (mode === 'off') {
               setEnabled(sessionId, false)
               return { kind: 'success', text: '进度板已关闭；Agent 不再加载进度工具，文件上报协议恢复，手动编辑仍会保存。' }
@@ -2936,7 +3451,7 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
             setEnabled(sessionId, true)
             return {
               kind: 'success',
-              text: '进度板已启用；之后在主界面发消息时 Agent 会自动更新，收起侧栏也不会关闭。输入 /progress off 可关闭。',
+              text: '进度板已启用；之后在主界面发消息时 Agent 会自动更新，收起侧栏也不会关闭。输入 /progress off 可关闭；/progress plan <slug> 可绑定计划目录。',
             }
           },
         }),

@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # 本仓无 lockfile（零构建、纯 ESM 单包），故用 install 而非 ci
+      - name: 安装依赖
+        run: npm install --no-audit --no-fund
+
+      - name: 语法门（宿主/客户端/锚点三文件）
+        run: |
+          set -euo pipefail
+          node --check index.js
+          node --check client.js
+          node --check anchor.js
+
+      - name: 测试
+        run: npm test

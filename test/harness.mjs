@@ -6,7 +6,7 @@ import { apply } from '../index.js'
 
 export const SESSION = 'session-union-test'
 
-export function createHarness({ seed = {}, config = {}, withProjection = true, withProvide = true, storageless = false, llm = undefined, settings = undefined } = {}) {
+export function createHarness({ seed = {}, config = {}, withProjection = true, withProvide = true, storageless = false, llm = undefined, settings = undefined, cwd = '' } = {}) {
   const records = { ...seed }
   const routes = new Map()
   const toolMap = new Map()
@@ -64,8 +64,10 @@ export function createHarness({ seed = {}, config = {}, withProjection = true, w
   const agent = {
     id: SESSION,
     // v0.3.0：todo 镜像写通道。默认记录调用；测试可覆写 append 注入失败。
+    // v0.5.0：cwd 放在 session **顶层**（实测 shape，不是 header.cwd）——plan 扫描靠它。
     session: {
       id: SESSION,
+      ...(cwd ? { cwd } : {}),
       append(type, data) { appends.push({ type, data }); return Promise.resolve() },
     },
     ctx: {
@@ -151,7 +153,9 @@ export function createHarness({ seed = {}, config = {}, withProjection = true, w
     run: () => apply(ctx, config),
     /** 按 (session, {type, data}) 派发一条 session/event */
     emit(type, data, session) {
-      for (const h of listeners.filter((l) => l.type === 'session/event')) h.handler(session ?? { id: SESSION }, { type, data })
+      // 默认 session 带顶层 cwd（实测 shape）：plan 扫描靠事件流里的 session。
+      const target = session ?? (cwd ? { id: SESSION, cwd } : { id: SESSION })
+      for (const h of listeners.filter((l) => l.type === 'session/event')) h.handler(target, { type, data })
     },
   }
 }
