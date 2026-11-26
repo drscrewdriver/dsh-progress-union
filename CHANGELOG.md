@@ -2,6 +2,17 @@
 
 本项目的所有值得记录的变更都写在这里。版本号遵循语义化版本。
 
+## 0.5.1 (2026-11-26)
+
+**fix(头部图标反色)：板样式改为 apply 阶段注入 document.head + 按钮内联兜底。**
+
+起因：深色主题下会话头部那枚进度板图标偶尔显示成「浅底深字」的反色块。
+
+- 根因是样式到达时序，不是主题或配色：`.pb-header-btn` 的规则只在组件内 `h('style', null, CSS)` 里，而头部按钮 (`conversation.session.header.utilities`) 比侧栏面板 / dock 都先挂载；dock 在进度板为空时又提前 `return null`，连自己的 `<style>` 都不渲染 → 按钮先以浏览器默认 `<button>`（`ButtonFace` 底 + 1px 边框 + `ButtonText` 字）出场，碰巧打开过面板后才正常。
+- **fix(全局注入)**：抽出 `ensureHeadStyle(id, css)`，`ensureUnionSettingsStyle` 复用；新增 `ensureUnionBoardStyle()`（id `dsh-progress-union-board-style`）在 `apply()` 内调用，板样式不再依赖任何组件挂载。
+- **fix(内联兜底)**：`ProgressHeaderButton` 加 `HEADER_BTN_FALLBACK` 内联关键外壳（尺寸 / 透明底 / 无边框 / `label-secondary` 字色 / `appearance:none`）。因内联优先级高于样式表，hover 反馈改由 `useState` 驱动，不再依赖 `.pb-header-btn:hover`。
+- 全量 `npm test` **79/79** 绿。
+
 ## 0.5.0 (2026-11-26)
 
 **plan 文档（spec/tasks/checklist）喂给任务管理 LLM + PTC 通道容错。**

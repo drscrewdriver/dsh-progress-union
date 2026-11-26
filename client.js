@@ -837,15 +837,53 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /*
+     * 内联兜底：.pb-header-btn 的样式来自插件 CSS，而这段 CSS 只在面板挂载时
+     * 才进 DOM。头部按钮比面板先出现，没有兜底就会露出浏览器默认按钮
+     * （浅底 + 边框 = 深色头部上的反色块）。这里把「不依赖样式表」的那层
+     * 关键外壳写成内联 style 兜底；全局注入（ensureUnionBoardStyle）是主路径，
+     * 两端任一到位都不会再露出默认按钮。
+     */
+    const HEADER_BTN_FALLBACK = {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 28,
+      height: 28,
+      padding: 0,
+      border: '1px solid transparent',
+      borderRadius: 6,
+      background: 'transparent',
+      color: 'var(--dsw-alias-label-secondary, currentColor)',
+      cursor: 'pointer',
+      lineHeight: 1,
+      boxShadow: 'none',
+      appearance: 'none',
+      WebkitAppearance: 'none',
+      font: 'inherit',
+    }
+
     function ProgressHeaderButton(props) {
       const t = makeT(props)
+      // 内联样式优先级高于样式表，hover 变色只能自己管：样式表没到场也要有反馈。
+      const [hovered, setHovered] = useState(false)
+      const style = hovered
+        ? {
+            ...HEADER_BTN_FALLBACK,
+            background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,.16))',
+            color: 'var(--dsw-alias-label-primary, currentColor)',
+          }
+        : HEADER_BTN_FALLBACK
       return h(
         'button',
         {
           type: 'button',
           className: 'pb-header-btn',
+          style,
           title: t('nav'),
           'aria-label': t('nav'),
+          onMouseEnter: () => setHovered(true),
+          onMouseLeave: () => setHovered(false),
           onClick: () => {
             try {
               props.openPanel?.()
@@ -1681,17 +1719,41 @@ window.__ModuleLoader__.load({
       .dsu-empty { padding: 12px 14px; border-radius: 10px; border: 1px dashed var(--dsw-alias-border-l1, rgba(128,128,128,.35)); font-size: 12px; line-height: 1.6; opacity: .8; }
     `
 
-    function ensureUnionSettingsStyle() {
+    /**
+     * 把一段 CSS 挂到 document.head（幂等）。
+     *
+     * 组件内的 `h('style', null, CSS)` 只覆盖「该组件自己渲染出来的子树」：
+     * - 会话头部工具区（conversation.session.header.utilities）比面板先挂载；
+     * - 输入框 dock 在进度板为空时会提前 return，连自己的 <style> 都不渲染。
+     * 两处都可能出现「样式还没到、节点已经画出来」，于是退化成浏览器默认按钮
+     * （浅底 ButtonFace + 1px 边框 + 深色 ButtonText），在深色头部上就是反色块。
+     * 头部图标那枚 .pb-header-btn 正踩在这个时序里。
+     */
+    function ensureHeadStyle(id, css) {
       try {
         if (typeof document === 'undefined') return
-        if (document.getElementById(SETTINGS_STYLE_ID)) return
+        if (document.getElementById(id)) return
         const el = document.createElement('style')
-        el.id = SETTINGS_STYLE_ID
-        el.textContent = SETTINGS_CSS
+        el.id = id
+        el.textContent = css
         document.head.appendChild(el)
       } catch (_error) {
         // 无 DOM（SSR / 测试环境）时静默跳过
       }
+    }
+
+    function ensureUnionSettingsStyle() {
+      ensureHeadStyle(SETTINGS_STYLE_ID, SETTINGS_CSS)
+    }
+
+    const BOARD_STYLE_ID = 'dsh-progress-union-board-style'
+
+    /**
+     * 进度板 / dock / 头部按钮共用的那套 CSS，必须在 apply() 时就进 head，
+     * 不能等某个组件挂载——否则头部图标先画出来就是无样式默认按钮。
+     */
+    function ensureUnionBoardStyle() {
+      ensureHeadStyle(BOARD_STYLE_ID, CSS)
     }
 
     function SettingsSwitch(props) {
@@ -2714,6 +2776,9 @@ window.__ModuleLoader__.load({
         // 卡内自己订阅句柄并重取 scope，所以两个座位都可以先注空 prop。
         bindUnionConfigForms(ctx)
         ensureUnionSettingsStyle()
+        // 板样式（含头部按钮 .pb-header-btn）同样要在 apply 阶段就进 head：
+        // 头部图标比侧栏面板 / dock 都早挂载，晚一步就是反色默认按钮。
+        ensureUnionBoardStyle()
         const registerSettingsSeat = (seat, options) =>
           ctx.slots.inject(seat, () =>
             ctx.slots.register(
