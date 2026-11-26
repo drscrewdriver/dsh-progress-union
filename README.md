@@ -7,6 +7,15 @@
 - [l3j3y3/dsh-progress-board](https://github.com/l3j3y3/dsh-progress-board) —— 用户可编辑实时进度板（槽位、revision/diff/ack、staleness nudge）
 - [uuhihj/task-progress-bar](https://github.com/uuhihj/task-progress-bar)（鲸程 dsh-progress-widget）—— 事件时间引擎（steps/elapsed/ETA 学习链）
 
+## 安装
+
+```bash
+npm i dsh-progress-union          # 走 npm 版本号
+# 或本地开发：pnpm --dir <profile> add file:<repo>/dsh-progress-union-<ver>.tgz
+```
+
+装好后在 profile 的 `dsh.profile.bundles` 里挂上 `dsh-progress-union`，重启宿主加载；设置面在「设置 → 插件 → progress-union」。
+
 ## 它解决什么
 
 长程任务被上下文压缩时最容易丢的是"我干到哪了"。本插件把这件事拆成两个正交数据面并统一出口：
@@ -135,7 +144,7 @@ assistant:
 
 - 不修改上游两仓库；不改 dsh-prime-memory / dsh-spirit / dsh-brief-sidebar / dsh-context-compression-improved 的任何代码。
 - `slotTrail` 恒为 `null`：prime-memory 关闭槽位 → L1 记忆的"后置清理扇出"仅有定性方案（见 `docs/`），字段为未来集成预留。
-- 不发 npm；原型验证消费方后再谈发布门禁。
+- 发布形态：npm 包 `dsh-progress-union` 自 0.1.0 起逐版打 tag 与 GitHub Release；宿主侧按 npm 版本号安装，不再依赖本地 tgz。
 
 ## docs/
 
@@ -146,5 +155,5 @@ assistant:
 ## 开发与测试
 
 ```bash
-npm test   # node --test test/*.test.mjs（41 用例，纯 mock ctx，无需宿主进程）
+npm test   # node --test test/*.test.mjs（47 用例，纯 mock ctx，无需宿主进程）
 ```

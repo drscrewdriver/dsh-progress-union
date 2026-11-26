@@ -1,6 +1,6 @@
 {
   "name": "dsh-progress-union",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "type": "module",
   "description": "进度结合原型：dsh-progress-board 槽位真相源 × 鲸程 widget 时间/ETA 引擎，另向压缩插件暴露只读三层进度锚点（service + HTTP 双平面）。基于 l3j3y3/dsh-progress-board (MIT) 与 uuhihj/task-progress-bar dsh-progress-widget (MIT)。",
   "license": "MIT",
@@ -27,13 +27,16 @@
     "cordis.patch.yml",
     "dsh.plugin.json",
     "icon.svg",
-    "docs/"
+    "docs/",
+    "test/",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs"
   },
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=22.19.0",
+    "dsh": ">=0.2.0-0 <0.3.0-0"
   },
   "dsh": {
     "bundle": {
@@ -57,7 +60,9 @@
     "dsh-plugin",
     "progress-board",
     "progress-anchor",
-    "compaction"
+    "compaction",
+    "progress-tracking",
+    "eta"
   ],
   "repository": {
     "type": "git",
