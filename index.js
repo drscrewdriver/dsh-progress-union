@@ -2660,6 +2660,57 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     'progress-union: progress_goal_report tool',
   )
 
+  if (commands) {
+    ctx.effect(
+      () =>
+        commands.register({
+          name: 'progress-goal',
+          description: '设置一个长程目标，自动续轮推进（预算/检查/重试），替代 /goal',
+          input: { hint: '[<objective>|status|budget <n>|edit <objective>|pause|resume|clear]' },
+          handler: async ({ agent, rawInput }) => {
+            const sessionId = sessionOfAgent(agent)
+            const raw = String(rawInput || '').trim()
+            const lower = raw.toLowerCase()
+            try {
+              if (lower === 'status' || raw === '') {
+                const view = goalView(sessionId)
+                return { kind: 'success', text: view.phase === 'idle' ? '没有目标。用法：/progress-goal <objective>' : renderGoalViewText(view) }
+              }
+              if (lower === 'clear') {
+                const current = goalView(sessionId)
+                if (current.phase === 'idle') return { kind: 'success', text: '没有目标可清除。' }
+                await clearGoal(sessionId)
+                return { kind: 'success', text: '目标已清除。' }
+              }
+              if (lower === 'pause') {
+                const view = await pauseGoal(sessionId)
+                return { kind: 'success', text: `目标已暂停\n${renderGoalViewText(view)}` }
+              }
+              if (lower === 'resume') {
+                const view = await resumeGoal(sessionId)
+                return { kind: 'success', text: `目标已恢复\n${renderGoalViewText(view)}` }
+              }
+              if (/^budget(?=\s)/i.test(raw)) {
+                const value = raw.slice(6).trim()
+                const view = await setGoalBudget(sessionId, Number(value))
+                return { kind: 'success', text: `预算已更新\n${renderGoalViewText(view)}` }
+              }
+              if (/^edit(?=\s)/i.test(raw)) {
+                const view = await editGoal(sessionId, raw.slice(4).trim())
+                return { kind: 'success', text: `目标已更新\n${renderGoalViewText(view)}` }
+              }
+              // 其余一律当作新目标 objective
+              const view = await createGoal(sessionId, raw)
+              return { kind: 'success', text: `目标已创建\n${renderGoalViewText(view)}` }
+            } catch (err) {
+              return { kind: 'error', text: err instanceof Error ? err.message : String(err) }
+            }
+          },
+        }),
+      'progress-union: /progress-goal command',
+    )
+  }
+
   const agentDisposers = new Map()
   function bindAgentContext(agent) {
     const sessionId = sessionOfAgent(agent)
