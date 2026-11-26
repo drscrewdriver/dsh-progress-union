@@ -45,6 +45,11 @@ export const Config = z.object({
     autoSyncThrottleMs: z.number().step(1000).min(0).default(60000).volatile(),
     maxItems: z.number().step(1).min(1).default(12).volatile(),
   }).default({}),
+  todoSync: z.union(['off', 'mirror', 'reconcile']).default('reconcile').volatile(),
+  todo: z.object({
+    maxReconcileIntervalMs: z.number().step(1000).min(0).default(60000).volatile(),
+    mirrorThrottleMs: z.number().step(1).min(0).default(200).volatile(),
+  }).default({}),
 })
 
 // —— 路由与存储标识 ——
@@ -120,6 +125,17 @@ const ASSISTANT_SYSTEM = 'You are a progress assistant for a task board in a lon
   'Emit at most 8 changes. If nothing needs changing, use {"board":{"changes":[]},"round":{...},"note":"..."}. ' +
   'Respond with the JSON object only — no prose, no code fences.'
 
+// v0.3.0 todo 裁决 system：只做差异裁决，不改写事实；输出严格三选一。
+const TODO_RECONCILE_SYSTEM = 'You reconcile a task board with an external official todo list. ' +
+  'The board is the user-facing source of truth; the todo list is the model work list. ' +
+  'Given both lists plus recent assistant output/tool activity, decide ONE resolution: ' +
+  '"adopt-todo" (todo is newer/correct, replace board), "keep-board" (board is correct, re-mirror it), ' +
+  'or "merge" (apply incremental board.changes without dropping board facts). ' +
+  'Output strictly ONE JSON object: ' +
+  '{"resolution":"adopt-todo|keep-board|merge","board":{"changes":[{"id"?:string,"kind"?:string,"title"?:string,"status"?:string}]},"todo":{"todos"?:[]},"note":"<one line>"}. ' +
+  'For "merge", board.changes must use the same shape as the board assistant changes. ' +
+  'Emit at most 8 changes. Respond with the JSON object only — no prose, no code fences.'
+
 // ============================================================================
 // 通用工具（board fork）
 // ============================================================================
@@ -158,6 +174,7 @@ function emptyState(sessionId) {
     updatedAt: now,
     items: [],
     userChanges: [],
+    todoMirror: null, // v0.3.0：自家镜像写入的 hash/at/count，回环识别用
     goal: emptyGoal(),
   }
 }
@@ -199,6 +216,54 @@ function summarize(items) {
     todo: counts.todo,
     blocked: counts.blocked,
     percent: total === 0 ? 0 : Math.round(sum / total),
+  }
+}
+
+// —— v0.3.0：板 → 官方 todo 的纯映射（content 唯一非空、in_progress ≤1）——
+function boardToTodos(state, maxItems) {
+  const limit = Math.max(1, Number(maxItems) || 12)
+  const items = (Array.isArray(state && state.items) ? state.items : [])
+    .slice()
+    .sort((a, b) => a.order - b.order || a.updatedAt - b.updatedAt || a.id.localeCompare(b.id))
+    .slice(0, limit)
+  const todos = []
+  const seen = new Set()
+  let doingSeen = false
+  for (const item of items) {
+    const content = String(item && item.title || '').trim()
+    if (!content || seen.has(content)) continue
+    seen.add(content)
+    let status = 'pending'
+    if (item.status === 'done') status = 'completed'
+    else if (item.status === 'doing') {
+      if (!doingSeen) { status = 'in_progress'; doingSeen = true }
+    }
+    todos.push({ content, status })
+  }
+  return todos
+}
+
+// 稳定内容哈希（顺序敏感）：同一批 todos 同值，顺序变化不同值。
+function hashTodos(todos) {
+  const stable = JSON.stringify((Array.isArray(todos) ? todos : []).map((t) => [String(t && t.content || ''), String(t && t.status || '')]))
+  let h1 = 0x811c9dc5
+  let h2 = 0x01000193
+  for (let i = 0; i < stable.length; i += 1) {
+    const c = stable.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 16777619) >>> 0
+    h2 = Math.imul(h2 + c + i, 2246822519) >>> 0
+  }
+  return h1.toString(36) + h2.toString(36)
+}
+
+function todoMirrorOf(state) {
+  const m = state && state.todoMirror
+  if (!isObject(m)) return null
+  return {
+    hash: typeof m.hash === 'string' ? m.hash : '',
+    at: finiteNumber(m.at) ?? 0,
+    count: finiteNumber(m.count) ?? 0,
+    unsupported: m.unsupported === true,
   }
 }
 
@@ -508,6 +573,9 @@ const DEFAULT_CONFIG = {
     maxTools: 3,
     maxItems: 12,
   },
+  // v0.3.0：板 → 官方 todo 镜像与冲突裁决。默认 reconcile；不想要行为变更可在设置页关。
+  todoSync: 'reconcile', // off | mirror | reconcile
+  todo: { maxReconcileIntervalMs: 60_000, mirrorThrottleMs: 200 },
   // 辅助 LLM（审查/监视 + 槽位管理 + 轮次草案）：
   //   mode: 'registered' 走宿主 llm.stream（选已注册 llm-pi-ai provider/model）；
   //         'direct' 走自建 OpenAI 兼容端点（baseUrl/apiKey/model）；'' 关。
@@ -579,6 +647,25 @@ export async function apply(ctx, config) {
     return out
   }
   cfg.assistant = assistantNow()
+  // todoSync / todo 叶子同样逐次解包：设置页改完立即生效。
+  const todoSyncRaw = config && typeof config === 'object' ? config.todoSync : undefined
+  Object.defineProperty(cfg, 'todoSync', {
+    get: () => readVolatile(todoSyncRaw, DEFAULT_CONFIG.todoSync),
+    configurable: true, enumerable: true,
+  })
+  const todoRaw = config && typeof config === 'object' ? config.todo : undefined
+  function todoNow() {
+    const base = DEFAULT_CONFIG.todo
+    const raw = unwrapLive(todoRaw)
+    if (!isObject(raw)) return { ...base }
+    const out = { ...base }
+    for (const key of Object.keys(base)) {
+      const v = unwrapLive(raw[key])
+      if (v !== undefined) out[key] = v
+    }
+    return out
+  }
+  Object.defineProperty(cfg, 'todo', { get: todoNow, configurable: true, enumerable: true })
   const now = () => Date.now()
 
   // —— 状态容器 ——
@@ -687,6 +774,7 @@ export async function apply(ctx, config) {
       if (typeof item.approach !== 'string') item.approach = ''
     }
     if (typeof state.enabled !== 'boolean') state.enabled = false
+    if (state.todoMirror !== null && !isObject(state.todoMirror)) state.todoMirror = null
     if (!isObject(state.goal)) state.goal = emptyGoal()
     else {
       const g = state.goal
@@ -716,6 +804,174 @@ export async function apply(ctx, config) {
     return writeChain
   }
 
+  // —— v0.3.0：官方 todo 镜像 + 冲突裁决（全在 apply 闭包内，共享 states/cfg）——
+  const agentOfSession = new Map() // sessionId → agent（installAgentHook 时写入，disposed 清理）
+  const todoMirrorTimers = new Map()
+  const lastReconcileAt = new Map()
+  const reconcileCallsThisTurn = new Map()
+
+  function writeTodoMirror(sessionId, at) {
+    const state = states.get(sessionId)
+    if (!state || !state.enabled) return false
+    const todos = boardToTodos(state, cfg.observer.maxItems)
+    const hash = hashTodos(todos)
+    const agent = agentOfSession.get(sessionId)
+    if (!agent || !agent.session || typeof agent.session.append !== 'function') {
+      // 旧宿主 / 测试基座无 append：静默降级，板与迷你条照旧。
+      state.todoMirror = { hash: '', at, count: todos.length, unsupported: true }
+      void persist(sessionId)
+      return false
+    }
+    state.todoMirror = { hash, at, count: todos.length, unsupported: false }
+    try {
+      const result = agent.session.append('todo/write', { todos })
+      if (result && typeof result.catch === 'function') void result.catch(() => {})
+    } catch (_err) {
+      state.todoMirror = { hash: '', at, count: todos.length, unsupported: true }
+    }
+    void persist(sessionId)
+    return true
+  }
+
+  function scheduleTodoMirror(sessionId) {
+    if (String(cfg.todoSync || 'off') === 'off') return
+    const state = states.get(sessionId)
+    if (!state || !state.enabled) return
+    const delay = Math.max(0, Number(cfg.todo.mirrorThrottleMs) || 0)
+    const prev = todoMirrorTimers.get(sessionId)
+    if (prev) clearTimeout(prev)
+    const timer = setTimeout(() => {
+      todoMirrorTimers.delete(sessionId)
+      try { writeTodoMirror(sessionId, now()) } catch (_err) {}
+    }, delay)
+    todoMirrorTimers.set(sessionId, timer)
+  }
+
+  function parseReconcile(raw) {
+    const value = parseProposal(raw)
+    if (!value) return null
+    const resolution = String(value.resolution || '')
+    if (!['adopt-todo', 'keep-board', 'merge'].includes(resolution)) return null
+    const board = isObject(value.board) ? value.board : {}
+    const changes = Array.isArray(board.changes) ? board.changes : []
+    const todo = isObject(value.todo) ? value.todo : {}
+    return {
+      resolution,
+      board: { changes },
+      todo: Array.isArray(todo.todos) ? { todos: todo.todos } : undefined,
+      note: String(value.note || '').slice(0, 200),
+    }
+  }
+
+  function todoItemsToBoardChanges(state, todos) {
+    const changes = state.items.slice()
+      .sort((a, b) => a.order - b.order)
+      .map((item) => ({ id: item.id, remove: true }))
+    const seen = new Set()
+    for (const t of todos.slice(0, Math.max(0, MAX_CHANGES - changes.length))) {
+      if (!isObject(t)) continue
+      const title = text(String(t.content ?? ''), MAX_TITLE)
+      if (!title || seen.has(title)) continue
+      seen.add(title)
+      const st = String(t.status || '')
+      const status = st === 'completed' ? 'done' : st === 'in_progress' ? 'doing' : 'todo'
+      changes.push({ title, status })
+    }
+    return changes.slice(0, MAX_CHANGES)
+  }
+
+  async function maybeReconcileTodo(sid, incomingTodos, incomingHash) {
+    if (String(cfg.todoSync || '') !== 'reconcile') return
+    if (!assistantReady() || !isEnabled(sid)) return
+    const mirror = todoMirrorOf(states.get(sid))
+    if (mirror && !mirror.unsupported && incomingHash === mirror.hash) return
+    const at = now()
+    if (at - (lastReconcileAt.get(sid) || 0) < Math.max(0, Number(cfg.todo.maxReconcileIntervalMs) || 0)) return
+    if ((reconcileCallsThisTurn.get(sid) || 0) >= 1) return
+    reconcileCallsThisTurn.set(sid, (reconcileCallsThisTurn.get(sid) || 0) + 1)
+    lastReconcileAt.set(sid, at)
+    const a = liveAssistant()
+    const state = states.get(sid)
+    const o = obsOf(sid)
+    const todoLines = incomingTodos.slice(0, cfg.observer.maxItems)
+      .map((t, i) => `${i + 1}. [${String(t && t.status || '')}] ${String(t && t.content || '')}`)
+    const lastOutput = o.outputs[o.outputs.length - 1]
+    const lines = [
+      '进度板（真相源）：',
+      ...renderChecklist(state, cfg.observer.maxItems),
+      '官方 todo（外部改动）：',
+      ...todoLines,
+      lastOutput ? `最近输出：${lastOutput.text}` : '最近输出：—',
+      o.tools.length ? `最近动作：${o.tools.slice(-cfg.observer.maxTools).map((x) => x.name).join(' → ')}` : '最近动作：—',
+    ]
+    try {
+      const raw = await callAssistant({ system: TODO_RECONCILE_SYSTEM, user: lines.join('\n'), a })
+      const decision = parseReconcile(raw)
+      if (!decision) throw new Error('reconcile-unparsable')
+      if (decision.resolution === 'adopt-todo') {
+        await applyChanges({ sessionId: sid, changes: todoItemsToBoardChanges(state, incomingTodos), origin: 'assistant' })
+      } else if (decision.resolution === 'merge') {
+        const g = applyAssistantSlotChanges(state, sid, decision, a)
+        if (g.count > 0) await applyChanges({ sessionId: sid, changes: g.changes, origin: 'assistant', ackUserRevision: g.ackUserRevision })
+      }
+      // keep-board 不改板；三支都重写镜像（落地后 todo 与板一致）。
+      writeTodoMirror(sid, now())
+      o.assistantNote = `todo 裁决：${decision.resolution}${decision.note ? ' · ' + decision.note : ''}`
+      o.assistantError = ''
+    } catch (err) {
+      // 失败/超时/坏 JSON：两侧均不改，只记错误；观察块给漂移行。
+      o.assistantError = err instanceof Error ? err.message : String(err)
+    }
+  }
+
+  // 通用助手传输：registered 走 llm.stream，direct 走 fetch；两条链路共用。
+  async function callAssistant({ system, user, a }) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), Math.max(2000, Number(a.timeoutMs) || 20000))
+    try {
+      if (a.mode === 'registered') {
+        // system 必须走 options.system；content 必须是 ContentBlock[]（0.1.7 契约回归）。
+        const stream = llm.stream({
+          provider: String(a.provider),
+          model: String(a.model),
+          system,
+          messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
+          signal: controller.signal,
+        })
+        let raw = ''
+        for await (const chunk of stream) {
+          if (controller.signal.aborted) break
+          if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') raw += chunk.text
+          else if (chunk && chunk.type === 'finish' && chunk.reason && chunk.reason.kind !== 'stop' && chunk.reason.kind !== 'max-tokens') {
+            throw new Error(`assistant finish: ${chunk.reason.kind}`)
+          }
+        }
+        if (raw.trim() === '') throw new Error('assistant-empty')
+        return raw
+      }
+      const base = String(a.baseUrl || '').replace(/\/+$/, '')
+      const response = await fetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(String(a.apiKey || '') !== '' ? { authorization: `Bearer ${a.apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model: a.model,
+          temperature: 0,
+          max_tokens: 600,
+          messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+        }),
+        signal: controller.signal,
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const body = await response.json()
+      return String(body?.choices?.[0]?.message?.content ?? '')
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   function publicSnapshot(state) {
     const items = state.items.slice().sort((a, b) => a.order - b.order).map(itemView)
     return {
@@ -731,6 +987,16 @@ export async function apply(ctx, config) {
       storageError: storageError || null,
       items,
       summary: summarize(items),
+      // v0.3.0：官方 todo 同步状态回声
+      todo: (() => {
+        const m = todoMirrorOf(state)
+        return {
+          sync: String(cfg.todoSync || 'off'),
+          mirroredAt: m ? m.at : 0,
+          count: m ? m.count : 0,
+          unsupported: m ? m.unsupported : false,
+        }
+      })(),
       // /progress-goal 迷你目标域回声
       goal: state.goal ? goalView(state.sessionId) : null,
       // 辅助 LLM 的配置回声：只回非机密字段，apiKey 只回布尔
@@ -940,6 +1206,8 @@ export async function apply(ctx, config) {
     if (revisionChanged || (origin === 'agent' && ackUserRevision !== undefined)) {
       states.set(sessionId, working)
       await persist(sessionId)
+      // 唯一写板入口：持久化之后调度 todo 镜像（200ms 去抖，off 时直接返回）。
+      if (revisionChanged) scheduleTodoMirror(sessionId)
     }
     // 任何 agent 调用（含 changes=[] 确认）都算一次"模型已看板"：重置催办计时；
     // 观察者自己的 autoSync（origin='observer'）只刷新板新鲜度，不抵消模型催办。
@@ -1520,51 +1788,8 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
       o.tools.length ? `最近动作：${o.tools.slice(-cfg.observer.maxTools).map((x) => x.name).join(' → ')}` : '最近动作：—',
       files.length ? `最近改动：${files.join(' · ')}` : '最近改动：—',
     ]
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), Math.max(2000, Number(a.timeoutMs) || 20000))
     try {
-      let raw = ''
-      if (a.mode === 'registered') {
-        // 应主 llm.stream 契约：system 必须走 options.system（adapter 才把它映射到
-        // provider 的 system 槽）；写进 messages 的 role:'system' 会被忽略 → 请求实际
-        // 没有 system，DeepSeek 回落到内置 "You are a helpful assistant." 并把它当正文
-        // 吐回来。content 也必须是 ContentBlock[]（块数组）而非裸字符串。
-        // 参考 dsh-media-lens/src/providers/registered.ts 的调用形状。
-        const stream = llm.stream({
-          provider: String(a.provider),
-          model: String(a.model),
-          system: ASSISTANT_SYSTEM,
-          messages: [{ role: 'user', content: [{ type: 'text', text: lines.join('\n') }] }],
-          signal: controller.signal,
-        })
-        for await (const chunk of stream) {
-          if (controller.signal.aborted) break
-          if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') raw += chunk.text
-          else if (chunk && chunk.type === 'finish' && chunk.reason && chunk.reason.kind !== 'stop' && chunk.reason.kind !== 'max-tokens') {
-            throw new Error(`assistant finish: ${chunk.reason.kind}`)
-          }
-        }
-        if (raw.trim() === '') throw new Error('assistant-empty')
-      } else {
-        const base = String(a.baseUrl || '').replace(/\/+$/, '')
-        const response = await fetch(`${base}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...(String(a.apiKey || '') !== '' ? { authorization: `Bearer ${a.apiKey}` } : {}),
-          },
-          body: JSON.stringify({
-            model: a.model,
-            temperature: 0,
-            max_tokens: 600,
-            messages: [{ role: 'system', content: ASSISTANT_SYSTEM }, { role: 'user', content: lines.join('\n') }],
-          }),
-          signal: controller.signal,
-        })
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const body = await response.json()
-        raw = String(body?.choices?.[0]?.message?.content ?? '')
-      }
+      const raw = await callAssistant({ system: ASSISTANT_SYSTEM, user: lines.join('\n'), a })
       const proposal = parseProposal(raw)
       if (!proposal) throw new Error('proposal-unparsable')
       o.assistantError = ''
@@ -1578,8 +1803,6 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
       }
     } catch (err) {
       o.assistantError = err instanceof Error ? err.message : String(err)
-    } finally {
-      clearTimeout(timer)
     }
   }
 
@@ -1620,8 +1843,12 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
       // 机械对比（算术，非语义）：两套清单完成数漂移 → 让模型自己核对
       const boardDone = state.items.filter((item) => item.status === 'done').length
       if (t.todoDone !== boardDone) {
+        // 旧对比行保留（既有 observer 用例断言逐字匹配），新漂移行按 spec 追加。
         lines.push(`对比：官方 todo 完成 ${t.todoDone}/${t.todoTotal} · 板完成 ${boardDone}/${state.items.length}（进度不一致，核对后修正一处）`)
+        lines.push(`[todo 漂移] 官方 ${t.todoDone}/${t.todoTotal} · 板 ${boardDone}/${state.items.length}（待裁决）`)
       }
+      const mirror = todoMirrorOf(state)
+      if (mirror && !mirror.unsupported) lines.push(`[todo 镜像] 已同步 rev=${state.revision} · ${mirror.count} 条`)
     }
     const files = Array.isArray(o.files) ? o.files.slice(-4) : []
     if (files.length) lines.push(`最近改动：${files.map((f) => `${shortPath(f.path)}（${f.tool}）`).join(' · ')}`)
@@ -1655,6 +1882,7 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     if (!agent || !agent.id || !agent.ctx) return
     if (hookedAgents.has(agent)) return
     hookedAgents.add(agent)
+    agentOfSession.set(sessionOfAgent(agent), agent)
     try {
       agent.ctx.on('agent/pre-step', async (payload, next) => {
         const sid = String(agent.session?.id ?? agent.id)
@@ -2095,6 +2323,12 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
             .filter(Boolean)
             .slice(0, 8)
           tk.lastActivityAt = now()
+          // 回环识别：自家镜像写入（hash 命中）只更新 ETA 原料，不触发裁决。
+          const mirror = todoMirrorOf(states.get(sid))
+          const incomingHash = hashTodos(todos)
+          if (!mirror || mirror.unsupported || incomingHash !== mirror.hash) {
+            void maybeReconcileTodo(sid, todos, incomingHash)
+          }
         }
         return
       }
@@ -2124,6 +2358,7 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
         return
       }
       if (type === 'turn/start') {
+        reconcileCallsThisTurn.set(sid, 0)
         const task = taskOf(sid)
         markLineage(task, session)
         const pendingText = userTextMap.get(sid) || ''
@@ -2810,6 +3045,7 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     for (const agent of agents?.list?.() ?? []) bindAgentContext(agent)
     const offCreated = ctx.on('agent/created', ({ agent }) => bindAgentContext(agent))
     const offDisposed = ctx.on('agent/disposed', ({ agent }) => {
+      agentOfSession.delete(sessionOfAgent(agent))
       const dispose = agentDisposers.get(sessionOfAgent(agent))
       if (dispose) {
         dispose()

@@ -47,6 +47,9 @@ test('Config：assistant / observer 的每个叶子都带 volatile（否则设�
     'observer.autoSyncCurrent',
     'observer.autoSyncThrottleMs',
     'observer.maxItems',
+    'todoSync',
+    'todo.maxReconcileIntervalMs',
+    'todo.mirrorThrottleMs',
   ]
   for (const key of expected) {
     assert.ok(key in leaves, `缺少配置键 ${key}`)
@@ -55,7 +58,7 @@ test('Config：assistant / observer 的每个叶子都带 volatile（否则设�
 })
 
 test('Config：外层对象不得自己标 volatile（嵌套 volatile 会被宿主拒绝）', () => {
-  for (const key of ['assistant', 'observer']) {
+  for (const key of ['assistant', 'observer', 'todo']) {
     const node = (Config.dict || Config.inner || {})[key]
     assert.ok(node, `缺少 ${key} 节点`)
     assert.equal((node.meta || {}).volatile, undefined, `${key} 这层不能标 volatile`)

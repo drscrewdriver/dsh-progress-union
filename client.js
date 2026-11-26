@@ -245,6 +245,15 @@ window.__ModuleLoader__.load({
       setAutoSyncCurrent: '自动同步 current',
       setAutoSyncThrottleMs: '自动同步节流（毫秒）',
       setMaxItems: '清单条目上限',
+      setTodoGroup: '官方 todo 同步',
+      setTodoHint: '板变更后自动镜像到宿主官方 todo 清单（会覆盖模型写的清单，谨慎开启）；外部改动可由辅助 LLM 裁决。',
+      setTodoSync: '同步模式',
+      setTodoOff: '关闭（不写 todo）',
+      setTodoMirror: '只镜像（板 → todo）',
+      setTodoReconcile: '镜像 + 裁决',
+      setTodoReconcileMs: '裁决最小间隔（毫秒）',
+      setTodoThrottleMs: '镜像去抖（毫秒）',
+      setTodoWriteNote: '写入事件：agent.session.append(\'todo/write\', { todos })（只读说明）',
       setSaved: '已保存',
       setFailed: '保存失败',
       setReadOnly: '当前 config 不可写',
@@ -402,7 +411,16 @@ window.__ModuleLoader__.load({
       setMaxIdleMs: 'Overdue time threshold (ms)',
       setAutoSyncCurrent: 'Auto-sync current',
       setAutoSyncThrottleMs: 'Auto-sync throttle (ms)',
-      setMaxItems: 'Checklist item cap',
+      setMaxItems: 'Max checklist items',
+      setTodoGroup: 'Official todo sync',
+      setTodoHint: 'Mirror the board to the host official todo list after every board change (overwrites the model-written list — enable with care); external edits can be reconciled by the assistant LLM.',
+      setTodoSync: 'Sync mode',
+      setTodoOff: 'Off (no todo writes)',
+      setTodoMirror: 'Mirror only (board → todo)',
+      setTodoReconcile: 'Mirror + reconcile',
+      setTodoReconcileMs: 'Reconcile min interval (ms)',
+      setTodoThrottleMs: 'Mirror debounce (ms)',
+      setTodoWriteNote: 'Write event: agent.session.append(\'todo/write\', { todos }) (read-only)',
       setSaved: 'Saved',
       setFailed: 'Save failed',
       setReadOnly: 'Current config is not writable',
@@ -1791,12 +1809,13 @@ window.__ModuleLoader__.load({
       const asObject = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {})
       const assistant = asObject(value.assistant)
       const observer = asObject(value.observer)
+      const todo = asObject(value.todo)
 
       // 文本/数字走草稿（避免逐字符写盘），开关与分段直接落盘（即时生效）。
       const readField = (group, key, fallback) => {
         const bucket = draft[group]
         if (bucket && Object.prototype.hasOwnProperty.call(bucket, key)) return bucket[key]
-        const stored = (group === 'assistant' ? assistant : observer)[key]
+        const stored = (group === 'assistant' ? assistant : group === 'todo' ? todo : observer)[key]
         return stored === undefined || stored === null ? fallback : stored
       }
       const setDraftField = (group, key, v) => setDraft((prev) => ({ ...prev, [group]: { ...(prev[group] || {}), [key]: v } }))
@@ -1827,8 +1846,10 @@ window.__ModuleLoader__.load({
       const flush = async () => {
         const aKeys = dirtyKeys('assistant')
         const oKeys = dirtyKeys('observer')
+        const todoKeys = dirtyKeys('todo')
         if (aKeys.length) await commit('assistant', { ...assistant, ...draft.assistant })
         if (oKeys.length) await commit('observer', { ...observer, ...draft.observer })
+        if (todoKeys.length) await commit('todo', { ...todo, ...draft.todo })
         setDraft({})
       }
 
@@ -1882,7 +1903,7 @@ window.__ModuleLoader__.load({
           },
         })
 
-      const hasDirty = dirtyKeys('assistant').length > 0 || dirtyKeys('observer').length > 0
+      const hasDirty = dirtyKeys('assistant').length > 0 || dirtyKeys('observer').length > 0 || dirtyKeys('todo').length > 0 || Object.prototype.hasOwnProperty.call(draft, 'todoSync')
       const mode = readField('assistant', 'mode', '')
       const authority = readField('assistant', 'authority', 'both')
 
@@ -1922,6 +1943,20 @@ window.__ModuleLoader__.load({
           h(SettingsRow, { label: t('setAutoSyncCurrent') }, switchInput('observer', observer, 'autoSyncCurrent', true)),
           h(SettingsRow, { label: t('setAutoSyncThrottleMs') }, numberInput('observer', 'autoSyncThrottleMs', 60000, 1000, 'ms')),
           h(SettingsRow, { label: t('setMaxItems') }, numberInput('observer', 'maxItems', 12, 1, '项')),
+        ),
+        h(
+          SettingsCard,
+          { title: t('setTodoGroup'), badge: t('setTodoSync'), hint: t('setTodoHint'), defaultOpen: false },
+          h(SettingsRow, { label: t('setTodoSync') },
+            h(SettingsSegment, {
+              value: Object.prototype.hasOwnProperty.call(draft, 'todoSync') ? draft.todoSync : (value.todoSync === undefined ? 'reconcile' : value.todoSync),
+              disabled: !writable || busy,
+              options: [['off', t('setTodoOff')], ['mirror', t('setTodoMirror')], ['reconcile', t('setTodoReconcile')]],
+              onChange: (v) => { setDraft((prev) => ({ ...prev, todoSync: v })); void commit('todoSync', v) },
+            })),
+          h(SettingsRow, { label: t('setTodoReconcileMs') }, numberInput('todo', 'maxReconcileIntervalMs', 60000, 1000, 'ms')),
+          h(SettingsRow, { label: t('setTodoThrottleMs') }, numberInput('todo', 'mirrorThrottleMs', 200, 1, 'ms')),
+          h('div', { className: 'dsu-hint' }, t('setTodoWriteNote')),
         ),
         h(
           SettingsCard,

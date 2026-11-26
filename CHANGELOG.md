@@ -2,6 +2,15 @@
 
 本项目的所有值得记录的变更都写在这里。版本号遵循语义化版本。
 
+## 0.3.0 (2026-11-26)
+
+**板变更镜像到官方 todo（可关）+ 助手冲突裁决。**
+
+- feat(todo)：板 → 官方 todo 镜像 + 助手冲突裁决。设置页三段开关 `off` / `mirror` / `reconcile`（默认 **`reconcile`**）——默认从 `mirror` 改为 `reconcile` 属**行为变更**：外部 todo 改动会触发助手裁决，`adopt-todo` 会覆盖模型写的清单，不想要就在设置页关掉或切 `off`；`mirror` 只做板 → todo 单向镜像；`reconcile` 还会据板与最近输出/动作做三选一裁决（adopt-todo / keep-board / merge）。
+  - hash 回环防护：自家镜像写入的 todos 由稳定内容哈希识别，命中只更新 ETA 原料、不触发裁决。
+  - 200ms 去抖：写板后调度镜像按 `mirrorThrottleMs`（默认 200ms）合并突发变更，避免逐帧写 todo。
+  - 助手不可用时只报漂移：无 registered/direct 助手或调用失败/超时/坏 JSON 时，两侧都不改，只在观察块记 `[todo 漂移]` 行，不阻断板与主流程。
+
 ## 0.1.8 (2026-11-26)
 
 **修复：registered 通道写错 DSH LLM 契约；配置面搬回宿主设置页。**

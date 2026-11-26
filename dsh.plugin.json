@@ -1,6 +1,6 @@
 {
   "id": "dsh-external/dsh-progress-union",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "main": "./index.js",
   "description": "进度结合原型：board 槽位真相源（用户可编辑、diff+ack 增量同步、staleness nudge）× 鲸程时间引擎（step 计数、ETA 三档 board>todo>local>prior、悬浮迷你条），并向压缩插件暴露只读三层进度锚点 progressAnchor（board 语义锚 + time 时间锚 + userEdits 未确认改动，service 与 HTTP 双平面）。",
   "engines": {

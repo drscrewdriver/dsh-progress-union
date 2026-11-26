@@ -60,9 +60,14 @@ export function createHarness({ seed = {}, config = {}, withProjection = true, w
 
   const systemPrompt = {}
 
+  const appends = []
   const agent = {
     id: SESSION,
-    session: { id: SESSION },
+    // v0.3.0：todo 镜像写通道。默认记录调用；测试可覆写 append 注入失败。
+    session: {
+      id: SESSION,
+      append(type, data) { appends.push({ type, data }); return Promise.resolve() },
+    },
     ctx: {
       effect(fn) {
         return fn()
@@ -132,6 +137,7 @@ export function createHarness({ seed = {}, config = {}, withProjection = true, w
     ctx,
     config,
     agent,
+    appends,
     records,
     routes,
     toolMap,
