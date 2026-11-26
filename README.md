@@ -62,6 +62,17 @@ Schema（version=1，字段名冻结）：
 
 同态保证：同 `(revision, steps, now)` 锚点逐字节相等（无时间戳漂移、无随机），可直接当指纹用。
 
+### 给其他插件用
+
+上面的契约是"是什么"，**怎么在自己的插件里读/订阅/降级/握手**见 [docs/consumer-guide.md](docs/consumer-guide.md)（三种读法、版本握手、订阅退订、四条消费规则、curl 示例、`isAnchor`/`anchorLine` 用法）。零依赖的 `./anchor` 子路径自 0.4.0 起可用：
+
+```js
+import { ANCHOR_VERSION, ANCHOR_ROUTES, isAnchor, anchorLine } from 'dsh-progress-union/anchor'
+// ANCHOR_VERSION 握手 · ANCHOR_ROUTES 三条只读路由 · isAnchor 形状校验 · anchorLine 单行摘要（形如 45% 3/7 · ETA 6m · stale 12m）
+```
+
+自 **v0.3.0** 起，板变更会镜像到宿主官方 todo（设置页三段开关 `off` / `mirror` / `reconcile`，默认 `reconcile` 会覆盖模型写的清单，属行为变更，可在设置页关掉或切到 `off`）；详见 [CHANGELOG](CHANGELOG.md#030-2026-11-26)。
+
 ## 使用
 
 - `/progress`（on）/ `/progress off`：语义与 board 原版一致——开过一次持续启用，收起侧栏不关闭。

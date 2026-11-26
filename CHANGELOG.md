@@ -2,6 +2,13 @@
 
 本项目的所有值得记录的变更都写在这里。版本号遵循语义化版本。
 
+## 0.4.0 (2026-11-26)
+
+**锚点开放 `./anchor` 子路径与订阅面，附消费者指南。**
+
+- feat(anchor)：新增 `./anchor` 子路径（零依赖导出 `ANCHOR_VERSION` / `ANCHOR_ROUTES` / `BOARD_STATUSES` / `isAnchor` / `anchorLine` 常量、校验与单行摘要）供其他插件握手消费；`progressAnchor` service 新增 `subscribe(listener, sessionId?)` 订阅（回调 `{sessionId, revision}`，同一 revision 去重、退订 `off()`）。
+  - 新增 `docs/consumer-guide.md`：三种读法（service / HTTP / sessionProjection）、版本握手、订阅退订、四条消费规则、curl 示例与工具函数用法；README 增「给其他插件用」小节指向该指南。
+
 ## 0.3.0 (2026-11-26)
 
 **板变更镜像到官方 todo（可关）+ 助手冲突裁决。**

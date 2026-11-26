@@ -20,6 +20,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
+import { ANCHOR_VERSION, ANCHOR_ROUTES, BOARD_STATUSES } from './anchor.js'
 
 // 设置页可见性：0.1.7+ 宿主把 composition entry 当设置节，直接按导出的 Config
 // **逐叶子**的 .volatile() 标记生成「设置 → 插件」里的表单，并把 volatile 字段以
@@ -55,9 +56,10 @@ export const Config = z.object({
 // —— 路由与存储标识 ——
 const ROUTE_BASE = '/progress-union'
 const LEGACY_BASE = '/progress-board' // 别名保留一版，与 board 原面板/脚本兼容
-const WIDGET_STATUS_ROUTE = '/dsh-progress/status'
+const WIDGET_STATUS_ROUTE = ANCHOR_ROUTES.status
+const ANCHOR_ROUTE = ANCHOR_ROUTES.anchor
+const SNAPSHOT_ROUTE = ANCHOR_ROUTES.snapshot
 const UNIT_NAME = 'progress_union'
-const ANCHOR_VERSION = 1
 
 // —— board 侧限额（fork 原值，不放宽）——
 const MAX_BODY_BYTES = 256 * 1024
@@ -71,7 +73,7 @@ const MAX_NOTE = 1600
 const MAX_GROUP = 80
 const STALE_MS = 10 * 60 * 1000
 const KICKOFF_COOLDOWN_MS = 60 * 1000
-const STATUSES = new Set(['todo', 'doing', 'done', 'blocked'])
+const STATUSES = new Set(BOARD_STATUSES)
 
 // —— /progress-goal 迷你目标域常量（自建，不复用官方 goals 域）——
 const GOAL_PHASES = new Set(['idle', 'active', 'paused', 'blocked', 'complete'])
@@ -1206,6 +1208,8 @@ export async function apply(ctx, config) {
     if (revisionChanged || (origin === 'agent' && ackUserRevision !== undefined)) {
       states.set(sessionId, working)
       await persist(sessionId)
+      // 锚点订阅：持久化后按 revision 去重推送（同一 revision 不重复）。
+      if (revisionChanged) notifyAnchor(sessionId, working.revision)
       // 唯一写板入口：持久化之后调度 todo 镜像（200ms 去抖，off 时直接返回）。
       if (revisionChanged) scheduleTodoMirror(sessionId)
     }
@@ -2529,6 +2533,8 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
   }
 
   // —— service 平面（同进程零 I/O；宿主无 provide 面时静默只留 HTTP）——
+  const anchorListeners = new Map() // sessionId -> Set<listener>
+  const lastAnchorRevision = new Map() // sessionId -> 已推送的 revision
   const anchorApi = {
     version: ANCHOR_VERSION,
     get(sessionId, atMs) {
@@ -2538,6 +2544,30 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
       const ids = new Set([...states.keys(), ...taskMap.keys()])
       return [...ids].map((sid) => buildAnchor(sid, finiteNumber(atMs) ?? now()))
     },
+    subscribe(listener, sessionId) {
+      if (typeof listener !== 'function') return () => {}
+      if (sessionId === undefined) {
+        const offs = [...states.keys(), ...taskMap.keys()].map((sid) => anchorApi.subscribe(listener, sid))
+        return () => offs.forEach((off) => off())
+      }
+      const sid = String(sessionId)
+      let set = anchorListeners.get(sid)
+      if (!set) { set = new Set(); anchorListeners.set(sid, set) }
+      set.add(listener)
+      return () => {
+        set.delete(listener)
+        if (set.size === 0) anchorListeners.delete(sid)
+      }
+    },
+  }
+  function notifyAnchor(sessionId, revision) {
+    const set = anchorListeners.get(sessionId)
+    if (!set || set.size === 0) return
+    if (lastAnchorRevision.get(sessionId) === revision) return
+    lastAnchorRevision.set(sessionId, revision)
+    for (const listener of [...set]) {
+      try { listener({ sessionId, revision }) } catch (_err) {}
+    }
   }
   if (typeof ctx.provide === 'function') {
     try {
