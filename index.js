@@ -26,6 +26,7 @@ import z from '@deepseek-ai/schemastery'
 // live ref（带 .get()）注入 apply。整对象套一层 .volatile() 不生成字段表单（面板
 // 只会空空如也），所以必须每个叶子单独标——与 dsh-llm-openai-completions 同式。
 export const Config = z.object({
+  protocolHint: z.boolean().default(true).volatile(),
   assistant: z.object({
     mode: z.union(['', 'registered', 'direct']).default('').volatile(),
     provider: z.string().default('').volatile(),
@@ -35,6 +36,14 @@ export const Config = z.object({
     authority: z.union(['slots', 'rounds', 'both']).default('both').volatile(),
     minIntervalMs: z.number().step(1000).min(0).default(90000).volatile(),
     autoApply: z.boolean().default(true).volatile(),
+  }).default({}),
+  observer: z.object({
+    enabled: z.boolean().default(true).volatile(),
+    maxIdleSteps: z.number().step(1).min(1).default(6).volatile(),
+    maxIdleMs: z.number().step(1000).min(1000).default(180000).volatile(),
+    autoSyncCurrent: z.boolean().default(true).volatile(),
+    autoSyncThrottleMs: z.number().step(1000).min(0).default(60000).volatile(),
+    maxItems: z.number().step(1).min(1).default(12).volatile(),
   }).default({}),
 })
 
@@ -534,7 +543,27 @@ function readVolatile(value, fallback) {
 
 export async function apply(ctx, config) {
   const cfg = Object.assign({}, DEFAULT_CONFIG, config && typeof config === 'object' ? config : {})
-  cfg.observer = Object.assign({}, DEFAULT_CONFIG.observer, cfg.observer && typeof cfg.observer === 'object' ? cfg.observer : {})
+  // observer 的每个叶子都是 volatile（设置页可改）：统一每次读取时解包。
+  const observerRaw = config && typeof config === 'object' ? config.observer : undefined
+  function observerNow() {
+    const base = DEFAULT_CONFIG.observer
+    const raw = unwrapLive(observerRaw)
+    if (!isObject(raw)) return { ...base }
+    const out = { ...base }
+    for (const key of Object.keys(base)) {
+      const v = unwrapLive(raw[key])
+      if (v !== undefined) out[key] = v
+    }
+    return out
+  }
+  // 用 getter 而不是快照：所有 `cfg.observer.x` 读点无需逐个改，设置页改完即生效。
+  Object.defineProperty(cfg, 'observer', { get: observerNow, configurable: true, enumerable: true })
+  const protocolHintRaw = config && typeof config === 'object' ? config.protocolHint : undefined
+  Object.defineProperty(cfg, 'protocolHint', {
+    get: () => readVolatile(protocolHintRaw, DEFAULT_CONFIG.protocolHint),
+    configurable: true,
+    enumerable: true,
+  })
   // assistant 的每个字段都是 volatile：保留原始 ref（整对象或逐叶子皆可），
   // 每次读取时解包，设置页改完下一次审查即生效，无需重启。
   const assistantRaw = config && typeof config === 'object' ? config.assistant : undefined

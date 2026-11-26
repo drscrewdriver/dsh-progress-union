@@ -215,6 +215,44 @@ window.__ModuleLoader__.load({
       llmAuto: '，自动落地',
       llmHint: '配置在「设置 → 插件 → dsh-progress-union」：mode 选 registered 复用 Settings→模型 里的 provider/model（走宿主，免密钥），或 direct 直连自建 OpenAI 兼容端点。仅滞后时触发，每回合至多一次。助手可增删改槽位并产出轮次草案（仅供参考），判断权归主模型。',
       llmSettingsHint: '在设置页修改',
+      setTitle: '进度板',
+      setLlmGroup: '辅助 LLM（监控/审查）',
+      setLlmHint: '选「已注册」复用 Settings→模型 里的 provider/model（走宿主 llm.stream，免密钥）；「直连」打自建 OpenAI 兼容端点。仅在进度板滞后时触发，每回合至多一次。',
+      setObserverGroup: '观察者（监控）',
+      setObserverHint: '板滞后到什么程度才催办/审查；关掉自动同步后只做提醒，不改 current。',
+      setApiGroup: 'API（只读）',
+      setApiHint: '同一 builder 双平面出口：进程内 service + HTTP，供压缩类插件只读消费。',
+      setMode: '模式',
+      setModeOff: '关闭',
+      setModeRegistered: '已注册 provider',
+      setModeDirect: '直连端点',
+      setProvider: '提供方',
+      setProviderHint: 'Settings→模型 里的 provider 名（registered 必填）',
+      setModel: '模型',
+      setBaseUrl: '端点地址',
+      setApiKey: 'API 密钥',
+      setApiKeyHint: '只写不回显；保存后快照只回布尔 hasApiKey',
+      setAuthority: '助手权限',
+      setAuthorityBoth: '槽位 + 轮次草案',
+      setAuthoritySlots: '只管理槽位',
+      setAuthorityRounds: '只产轮次草案',
+      setInterval: '最小间隔（毫秒）',
+      setIntervalHint: '两次审查之间的最小间隔，默认 90000',
+      setAutoApply: '自动落地槽位',
+      setObserverEnabled: '启用观察者',
+      setMaxIdleSteps: '滞后步数阈值',
+      setMaxIdleMs: '滞后时长阈值（毫秒）',
+      setAutoSyncCurrent: '自动同步 current',
+      setAutoSyncThrottleMs: '自动同步节流（毫秒）',
+      setMaxItems: '清单条目上限',
+      setSaved: '已保存',
+      setFailed: '保存失败',
+      setReadOnly: '当前 config 不可写',
+      setNoScope: '此宿主未提供设置写入面（configForms），只能从 profile 的 cordis.patch.yml 改配置。',
+      setApiService: 'service',
+      setApiAnchor: 'HTTP',
+      setApiSnapshot: '快照',
+      setApiStatus: '迷你条状态',
       etaLeft: '预计剩',
       etaOver: '已超预估',
       staleTag: '中断',
@@ -326,6 +364,44 @@ window.__ModuleLoader__.load({
       llmAuto: ', auto-applied',
       llmHint: 'Configure in Settings → Plugins → dsh-progress-union: set mode=registered to reuse a provider/model from Settings → Models (via host, no API key), or mode=direct for a self-hosted OpenAI-compatible endpoint. Triggered only while overdue, at most once per turn. The assistant may add/edit/remove slots and emit round suggestions (advice only); the main model decides.',
       llmSettingsHint: 'Change in Settings',
+      setTitle: 'Progress board',
+      setLlmGroup: 'Assistant LLM (monitor/audit)',
+      setLlmHint: 'Pick "Registered" to reuse a provider/model from Settings → Models (via host llm.stream, no API key), or "Direct" for a self-hosted OpenAI-compatible endpoint. Runs only while the board is overdue, at most once per turn.',
+      setObserverGroup: 'Observer (monitoring)',
+      setObserverHint: 'How overdue the board must be before nudging/auditing; once auto-sync is off the observer only reminds and never edits current.',
+      setApiGroup: 'API (read-only)',
+      setApiHint: 'One builder, two planes: in-process service plus HTTP, consumed read-only by compaction plugins.',
+      setMode: 'Mode',
+      setModeOff: 'Off',
+      setModeRegistered: 'Registered provider',
+      setModeDirect: 'Direct endpoint',
+      setProvider: 'Provider',
+      setProviderHint: 'Provider name under Settings → Models (required for registered)',
+      setModel: 'Model',
+      setBaseUrl: 'Endpoint URL',
+      setApiKey: 'API key',
+      setApiKeyHint: 'Write-only; the snapshot only reports hasApiKey',
+      setAuthority: 'Assistant authority',
+      setAuthorityBoth: 'Slots + round draft',
+      setAuthoritySlots: 'Slots only',
+      setAuthorityRounds: 'Round draft only',
+      setInterval: 'Min interval (ms)',
+      setIntervalHint: 'Minimum gap between two audits, default 90000',
+      setAutoApply: 'Auto-apply slot changes',
+      setObserverEnabled: 'Enable observer',
+      setMaxIdleSteps: 'Overdue step threshold',
+      setMaxIdleMs: 'Overdue time threshold (ms)',
+      setAutoSyncCurrent: 'Auto-sync current',
+      setAutoSyncThrottleMs: 'Auto-sync throttle (ms)',
+      setMaxItems: 'Checklist item cap',
+      setSaved: 'Saved',
+      setFailed: 'Save failed',
+      setReadOnly: 'Current config is not writable',
+      setNoScope: 'This host exposes no settings write surface (configForms); edit the profile cordis.patch.yml instead.',
+      setApiService: 'service',
+      setApiAnchor: 'HTTP',
+      setApiSnapshot: 'Snapshot',
+      setApiStatus: 'Dock status',
       etaLeft: '~',
       etaOver: 'over by',
       staleTag: 'idle',
@@ -515,6 +591,20 @@ window.__ModuleLoader__.load({
       .pb-llm-title { font-size: 12px; font-weight: 650; }
       .pb-llm-line { margin-top: 4px; font-size: 12px; line-height: 1.5; }
       .pb-llm-hint { margin-top: 4px; font-size: 11px; line-height: 1.5; opacity: .75; }
+      .pb-set { display: grid; gap: 14px; font-size: 12px; }
+      .pb-set-group { display: grid; gap: 8px; padding: 14px 16px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; }
+      .pb-set-group-title { font-size: 13px; font-weight: 650; }
+      .pb-set-group-hint { font-size: 11px; line-height: 1.5; opacity: .68; }
+      .pb-set-row { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 4px 12px; align-items: center; }
+      .pb-set-label { opacity: .85; }
+      .pb-set-control { min-width: 0; display: flex; gap: 6px; align-items: center; }
+      .pb-set-control > input[type="text"], .pb-set-control > input[type="password"], .pb-set-control > input[type="number"], .pb-set-control > select { flex: 1; min-width: 0; padding: 5px 8px; font: inherit; font-size: 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; background: transparent; color: inherit; }
+      .pb-set-control > input[type="checkbox"] { width: 15px; height: 15px; }
+      .pb-set-hint { grid-column: 2; font-size: 11px; line-height: 1.5; opacity: .65; }
+      .pb-set-banner { padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(217,119,6,.35); background: rgba(217,119,6,.08); font-size: 12px; line-height: 1.5; }
+      .pb-set-status { font-size: 12px; opacity: .75; }
+      .pb-set-api { display: grid; gap: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; opacity: .85; word-break: break-all; }
+      .pb-set-api b { font-weight: 600; opacity: .8; margin-right: 6px; }
       .pb-header-btn {
         display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
         border: 1px solid transparent; border-radius: 6px; background: transparent;
@@ -1457,6 +1547,176 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ── 设置分节（顶层 settings.section，与 dsh-browser-cdp 同式）─────────────
+    // 宿主不会凭导出的 Config 自动生成表单：设置面必须由客户端注册到
+    // `settings.section` 槽，数据臂走宿主原生 `configForms` 句柄
+    // （get(entryId) → subscribe/getSnapshot/set），写值带 revision、改完即生效。
+    function unionFormsScope(ctx) {
+      let forms
+      try {
+        forms = typeof ctx.get === 'function' ? ctx.get('configForms') : undefined
+      } catch (_error) {
+        forms = undefined
+      }
+      if (!forms || typeof forms.get !== 'function') return undefined
+      // entry id 在 cordis.patch.yml 里是 `progress-union`，包名是 `dsh-progress-union`，两个都试。
+      for (const id of ['progress-union', 'dsh-progress-union']) {
+        let scope
+        try {
+          scope = forms.get(id)
+        } catch (_error) {
+          scope = undefined
+        }
+        if (scope && typeof scope.getSnapshot === 'function' && typeof scope.subscribe === 'function' && typeof scope.set === 'function') return scope
+      }
+      return undefined
+    }
+
+    function SettingsRow(props) {
+      return h(
+        'label',
+        { className: 'pb-set-row' },
+        h('span', { className: 'pb-set-label' }, props.label),
+        h('span', { className: 'pb-set-control' }, props.children),
+        props.hint ? h('span', { className: 'pb-set-hint' }, props.hint) : null,
+      )
+    }
+
+    function SettingsGroup(props) {
+      return h(
+        'section',
+        { className: 'pb-set-group' },
+        h('div', { className: 'pb-set-group-title' }, props.title),
+        props.hint ? h('div', { className: 'pb-set-group-hint' }, props.hint) : null,
+        props.children,
+      )
+    }
+
+    function ProgressUnionSettings(props) {
+      const t = makeT(props)
+      const scope = props.scope
+      const [snap, setSnap] = useState(null)
+      const [status, setStatus] = useState('')
+      useEffect(() => {
+        if (!scope) return undefined
+        let alive = true
+        const read = () => {
+          if (!alive) return
+          try {
+            setSnap(scope.getSnapshot())
+          } catch (_error) {
+            // 句柄随时会随 entry 重载重建；读失败就保持上一帧
+          }
+        }
+        read()
+        let off
+        try {
+          off = scope.subscribe(read)
+        } catch (_error) {
+          off = undefined
+        }
+        return () => {
+          alive = false
+          if (typeof off === 'function') {
+            try {
+              off()
+            } catch (_error) {
+              // 卸载期失败无关紧要
+            }
+          }
+        }
+      }, [scope])
+
+      const value = (snap && snap.value) || {}
+      const writable = Boolean(scope) && (!snap || snap.writable !== false)
+      const assistant = value.assistant && typeof value.assistant === 'object' ? value.assistant : {}
+      const observer = value.observer && typeof value.observer === 'object' ? value.observer : {}
+
+      const write = async (field, next) => {
+        if (!scope) {
+          setStatus(t('setNoScope'))
+          return
+        }
+        if (!writable) {
+          setStatus(t('setReadOnly'))
+          return
+        }
+        try {
+          const ok = await scope.set(field, next)
+          setStatus(ok === false ? t('setFailed') : t('setSaved'))
+        } catch (_error) {
+          setStatus(t('setFailed'))
+        }
+      }
+      const putAssistant = (key, v) => void write('assistant', { ...assistant, [key]: v })
+      const putObserver = (key, v) => void write('observer', { ...observer, [key]: v })
+
+      const textOf = (v) => (v === undefined || v === null ? '' : String(v))
+      const inputText = (v, onChange) => h('input', { type: 'text', value: textOf(v), onChange: (e) => onChange(e.target.value) })
+      const inputSecret = (v, placeholder, onChange) => h('input', { type: 'password', value: textOf(v), placeholder, onChange: (e) => onChange(e.target.value) })
+      const inputNum = (v, step, onChange) => h('input', { type: 'number', step, value: Number.isFinite(Number(v)) ? Number(v) : 0, onChange: (e) => onChange(Number(e.target.value)) })
+      const inputBool = (v, fallback, onChange) => h('input', { type: 'checkbox', checked: v === undefined ? fallback : v !== false, onChange: (e) => onChange(e.target.checked) })
+      const inputSelect = (v, options, onChange) =>
+        h(
+          'select',
+          { value: textOf(v), onChange: (e) => onChange(e.target.value) },
+          options.map((opt) => h('option', { key: opt[0], value: opt[0] }, opt[1])),
+        )
+
+      return h(
+        'div',
+        { className: 'pb-set' },
+        scope ? null : h('div', { className: 'pb-set-banner' }, t('setNoScope')),
+        h(
+          SettingsGroup,
+          { title: t('setLlmGroup'), hint: t('setLlmHint') },
+          h(SettingsRow, { label: t('setMode') },
+            inputSelect(assistant.mode || '', [['', t('setModeOff')], ['registered', t('setModeRegistered')], ['direct', t('setModeDirect')]], (v) => putAssistant('mode', v))),
+          h(SettingsRow, { label: t('setProvider'), hint: t('setProviderHint') },
+            inputText(assistant.provider || '', (v) => putAssistant('provider', v))),
+          h(SettingsRow, { label: t('setModel') },
+            inputText(assistant.model || '', (v) => putAssistant('model', v))),
+          h(SettingsRow, { label: t('setBaseUrl') },
+            inputText(assistant.baseUrl || '', (v) => putAssistant('baseUrl', v))),
+          h(SettingsRow, { label: t('setApiKey'), hint: t('setApiKeyHint') },
+            inputSecret('', assistant.hasApiKey ? '••••••' : '', (v) => putAssistant('apiKey', v))),
+          h(SettingsRow, { label: t('setAuthority') },
+            inputSelect(assistant.authority || 'both', [['both', t('setAuthorityBoth')], ['slots', t('setAuthoritySlots')], ['rounds', t('setAuthorityRounds')]], (v) => putAssistant('authority', v))),
+          h(SettingsRow, { label: t('setInterval'), hint: t('setIntervalHint') },
+            inputNum(assistant.minIntervalMs === undefined ? 90000 : assistant.minIntervalMs, 1000, (v) => putAssistant('minIntervalMs', v))),
+          h(SettingsRow, { label: t('setAutoApply') },
+            inputBool(assistant.autoApply, true, (v) => putAssistant('autoApply', v))),
+        ),
+        h(
+          SettingsGroup,
+          { title: t('setObserverGroup'), hint: t('setObserverHint') },
+          h(SettingsRow, { label: t('setObserverEnabled') },
+            inputBool(observer.enabled, true, (v) => putObserver('enabled', v))),
+          h(SettingsRow, { label: t('setMaxIdleSteps') },
+            inputNum(observer.maxIdleSteps === undefined ? 6 : observer.maxIdleSteps, 1, (v) => putObserver('maxIdleSteps', v))),
+          h(SettingsRow, { label: t('setMaxIdleMs') },
+            inputNum(observer.maxIdleMs === undefined ? 180000 : observer.maxIdleMs, 1000, (v) => putObserver('maxIdleMs', v))),
+          h(SettingsRow, { label: t('setAutoSyncCurrent') },
+            inputBool(observer.autoSyncCurrent, true, (v) => putObserver('autoSyncCurrent', v))),
+          h(SettingsRow, { label: t('setAutoSyncThrottleMs') },
+            inputNum(observer.autoSyncThrottleMs === undefined ? 60000 : observer.autoSyncThrottleMs, 1000, (v) => putObserver('autoSyncThrottleMs', v))),
+          h(SettingsRow, { label: t('setMaxItems') },
+            inputNum(observer.maxItems === undefined ? 12 : observer.maxItems, 1, (v) => putObserver('maxItems', v))),
+        ),
+        h(
+          SettingsGroup,
+          { title: t('setApiGroup'), hint: t('setApiHint') },
+          h('div', { className: 'pb-set-api' },
+            h('div', null, h('b', null, t('setApiService')), 'ctx.get(\'progressAnchor\').get(sessionId) / .list()'),
+            h('div', null, h('b', null, t('setApiAnchor')), 'GET /progress-union/anchor?sessionId=<id>'),
+            h('div', null, h('b', null, t('setApiSnapshot')), 'GET /progress-union/snapshot?sessionId=<id>'),
+            h('div', null, h('b', null, t('setApiStatus')), 'GET /dsh-progress/status?sessionId=<id>'),
+          ),
+        ),
+        status ? h('div', { className: 'pb-set-status' }, status) : null,
+      )
+    }
+
     function ProgressSidePanel(props) {
       const t = makeT(props)
       const { sessionId } = props
@@ -2178,6 +2438,29 @@ window.__ModuleLoader__.load({
         )
 
         const t = ctx.locale.bind(NS)
+
+        // 独立设置分节：顶层 `settings.section`（与记忆/模型/插件并列）。
+        // order 215 接在宿主内置分节之后；旧宿主没声明该槽时 inject 空转，
+        // 面板与迷你条不受影响（不靠版本号判断，只靠槽位存在性）。
+        const settingsScope = unionFormsScope(ctx)
+        ctx.effect(
+          () =>
+            ctx.slots.inject('settings.section', () =>
+              ctx.slots.register(
+                {
+                  name: 'settings.section',
+                  id: 'dsh-progress-union',
+                  order: 215,
+                  locale: NS,
+                  label: () => t('setTitle'),
+                  inject: () => ({ scope: settingsScope }),
+                },
+                ProgressUnionSettings,
+              ),
+            ),
+          'progress-union: settings section',
+        )
+
         const wakeAgent = (sessionId, text) => {
           try {
             const binding = ctx.sessions.binding(sessionId)

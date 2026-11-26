@@ -14,7 +14,7 @@ npm i dsh-progress-union          # 走 npm 版本号
 # 或本地开发：pnpm --dir <profile> add file:<repo>/dsh-progress-union-<ver>.tgz
 ```
 
-装好后在 profile 的 `dsh.profile.bundles` 里挂上 `dsh-progress-union`，重启宿主加载；**所有配置面在「设置 → 插件 → dsh-progress-union」**（宿主按插件导出的 `Config` 逐叶子 `.volatile()` 自动生成表单，改完即生效、无需重启）。
+装好后在 profile 的 `dsh.profile.bundles` 里挂上 `dsh-progress-union`，重启宿主加载；**所有配置面在设置页的独立分节「进度板」**（与记忆 / 模型 / 插件并列，由客户端注册 `settings.section` 槽、经宿主 `configForms` 读写，改完即生效、无需重启）；也可在 profile 的 `cordis.patch.yml` 里写 `config:` 作部署面默认值。
 
 ## 它解决什么
 
@@ -120,7 +120,7 @@ observer:
 
 观察者默认是**规则版（零 LLM 费用）**。可选的辅助模型会把"清单 + 最近输出 + 最近动作 + 最近改动"交给一个小模型做审查：
 
-**配置位置：设置 → 插件 → dsh-progress-union**（字段同下；也可在 profile 的 `cordis.patch.yml` 里写 `config:` 作部署面默认值）。
+**配置位置：设置 → 进度板**（分节内三组：辅助 LLM / 观察者 / 只读 API；观察者的滞后阈值也在这张卡里）。
 
 ```yaml
 assistant:
@@ -158,5 +158,5 @@ assistant:
 ## 开发与测试
 
 ```bash
-npm test   # node --test test/*.test.mjs（48 用例，纯 mock ctx，无需宿主进程）
+npm test   # node --test test/*.test.mjs（51 用例，纯 mock ctx，无需宿主进程）
 ```

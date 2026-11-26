@@ -11,6 +11,20 @@
 - 回归测试：锁定 system 必须在 `options.system`、`messages` 不得出现 `role:system`、content 必须是块数组。
 - 设置面：`Config.assistant` 改为**逐叶子 `.volatile()`**（整对象标 volatile 不会生成字段表单——这就是「设置 → 插件」里看不到辅助 LLM 配置的原因）；侧边栏不再放编辑表单，只留只读状态并指向设置页；新增「live ref 逐字段重读」测试。
 
+## 0.1.9 (2026-11-26)
+
+**设置面真正落地：顶层 settings.section + configForms 三组卡片。**
+
+- 上一版只标了 schema 的 volatile，仍无入口——宿主不会凭导出的 `Config` 自动生成表单，设置面必须由**客户端**注册到 `settings.section` 槽（与 dsh-browser-cdp / dsh-spirit 同式）。
+- 新增独立分节「进度板」（id `dsh-progress-union`，order 215），卡内三组：
+  - 辅助 LLM：mode / provider / model / baseUrl / apiKey / authority / minIntervalMs / autoApply；
+  - 观察者：enabled / maxIdleSteps / maxIdleMs / autoSyncCurrent / autoSyncThrottleMs / maxItems；
+  - API（只读）：`progressAnchor` service、`/progress-anchor`、`/snapshot`、`/dsh-progress/status` 三条 HTTP。
+- 数据臂走宿主原生 `configForms.get(entryId)` 句柄（subscribe / getSnapshot / set，写值带 revision）；宿主无该服务时卡内显示只读提示，不静默丢入口。
+- `Config` 增 `protocolHint` 与 `observer.*` 叶子级 volatile；`apply` 对 `cfg.observer` / `cfg.protocolHint` 改用 getter 解包 live ref → 设置页改阈值立即生效。
+- 侧边栏保持只读状态行（编辑统一留在设置页，避免两处写同一命名空间）。
+- 测试：新增 3 条设置面契约守卫（逐叶子 volatile、外层不标、客户端注册 settings.section + configForms），共 51 用例全绿。
+
 > 说明：0.1.0 是真实构建产物；0.1.1–0.1.6 由 0.1.0 → 最终态的可核验 diff 按功能块「逻辑分化重建」，每一版都只包含该版本描述的能力，源码逐版可执行；0.1.7 是发布工程面。
 
 ## 0.1.7 (2026-11-26)
