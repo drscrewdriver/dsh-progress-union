@@ -94,12 +94,21 @@ progress_update 维护用户可见的实时进度板。每项含 title/status/pe
 其余采用可逆默认并标注假设；只有答案会显著改变路径、且至少两个维度各有三种合理解读时才问。
 输入/约束澄清最晚约 50%，任何澄清不拖到中后段。每任务最多 2 轮、每轮最多 3 问；选项化、给推荐默认、先复述理解。问前把相关任务标 blocked 并写清等什么。`
 
-// 辅助 LLM（审查/监视）的 system prompt：只允许"描述现状 + 校准百分比"，禁止增删/改状态。
-const ASSISTANT_SYSTEM = 'You are a progress auditor for a task board. Given the board checklist and the recent assistant output / tool activity / file changes, ' +
-  'update ONLY per-item current/next/percent so the board matches reality. ' +
-  'Never add, remove, retitle, or change the status of an item. ' +
-  'Output strictly one JSON object: {"changes":[{"id":"<existing id>","current"?:"...","next"?:"...","percent"?:0-100}],"note":"<one line audit verdict>"}. ' +
-  'If nothing needs updating, output {"changes":[],"note":"<why>"}.'
+// 辅助 LLM（审查/监视 + 槽位管理 + 轮次草案）的 system prompt。
+// 事实进输入、判断不进输入：助手可改槽位/产轮次草案，但判断权归主模型。
+const ASSISTANT_SYSTEM = 'You are a progress assistant for a task board in a long-running goal session. ' +
+  'Given the board checklist and recent assistant output / tool activity / file changes, produce two things: ' +
+  '(1) board slot changes that make the board match reality (you MAY add, edit, or remove items); ' +
+  '(2) a ROUND suggestion stating whether work should continue, is complete, or is blocked, with evidence. ' +
+  'Your round suggestion is ADVICE only — the main model decides; never claim the goal is done yourself. ' +
+  'Output strictly ONE JSON object with this shape: ' +
+  '{"board":{"changes":[{"id":"<existing id for edit/remove, omit for add>","kind":"add|edit|remove","title"?:string,"status"?:"todo|doing|done|blocked","percent"?:0-100,"current"?:string,"next"?:string,"note"?:string}]},' +
+  '"round":{"status":"continue|complete|blocked","summary":string,"evidence":string[],"nextSteps":string[],"blocker":string},"note":"<one line verdict>"}. ' +
+  'Use "add" with a title to create items; "edit" with an id to update; "remove" with an id to delete. ' +
+  'For "complete" you MUST list concrete evidence and the board should already be all done. ' +
+  'For "blocked" you MUST give a concrete blocker string. ' +
+  'Emit at most 8 changes. If nothing needs changing, use {"board":{"changes":[]},"round":{...},"note":"..."}. ' +
+  'Respond with the JSON object only — no prose, no code fences.'
 
 // ============================================================================
 // 通用工具（board fork）
@@ -1359,11 +1368,18 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     void applyChanges({ sessionId: sid, changes: [{ id: doing.id, current: line }], origin: 'observer' }).catch(() => {})
   }
 
-  // —— 辅助 LLM（审查/监视）：命题 → 校验 → 落地（只动 current/next/percent）——
+  // —— 辅助 LLM：registered（宿主 llm.stream） / direct（自建端点），默认关 ——
   function assistantReady() {
-    return cfg.assistant.mode === 'direct'
-      && String(cfg.assistant.baseUrl || '').trim() !== ''
-      && String(cfg.assistant.model || '').trim() !== ''
+    const a = liveAssistant()
+    if (a.mode === 'registered') {
+      return Boolean(llm && typeof llm.stream === 'function')
+        && String(a.provider || '').trim() !== ''
+        && String(a.model || '').trim() !== ''
+    }
+    if (a.mode === 'direct') {
+      return String(a.baseUrl || '').trim() !== '' && String(a.model || '').trim() !== ''
+    }
+    return false
   }
 
   // 从模型回复里抠出唯一 JSON 对象（容忍 ```json 围栏与前后废话）。
@@ -1384,12 +1400,66 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
    * 板滞后（或模型久未同步）时问一次辅助模型。失败静默（记 assistantError），
    * 绝不阻断主流程；每回合至多 maxCallsPerTurn 次、两次至少间隔 minIntervalMs。
    */
+  // 把助手 proposal 的 board.changes 校验+落地。护栏：≤maxSlotChanges、用户改动优先（先 ack）。
+  function applyAssistantSlotChanges(state, sid, proposal, a) {
+    const board = isObject(proposal.board) ? proposal.board : {}
+    const rawChanges = Array.isArray(board.changes) ? board.changes : []
+    if (rawChanges.length === 0) return { count: 0, ackUserRevision: undefined }
+    const byId = new Map(state.items.map((item) => [item.id, item]))
+    const changes = []
+    // 用户未确认的改动优先：本次先 ack，助手不得覆盖它们。
+    const ackUserRevision = state.userRevision > state.agentSeenRevision ? state.userRevision : undefined
+    for (const candidate of rawChanges.slice(0, Math.max(1, Number(a.maxSlotChanges) || 8))) {
+      if (!isObject(candidate)) continue
+      const kind = String(candidate.kind || (candidate.id ? 'edit' : 'add'))
+      if (kind === 'add') {
+        const title = text(candidate.title, MAX_TITLE)
+        if (!title) continue
+        const patch = { title }
+        if (STATUSES.has(candidate.status)) patch.status = candidate.status
+        if (typeof candidate.percent === 'number' && Number.isFinite(candidate.percent)) patch.percent = Math.max(0, Math.min(100, Math.round(candidate.percent)))
+        if (typeof candidate.current === 'string') patch.current = text(candidate.current, MAX_TEXT) || ''
+        if (typeof candidate.next === 'string') patch.next = text(candidate.next, MAX_TEXT) || ''
+        if (typeof candidate.note === 'string') patch.note = text(candidate.note, MAX_NOTE) || ''
+        changes.push(patch)
+      } else if (kind === 'remove') {
+        const target = byId.get(String(candidate.id || ''))
+        if (target) changes.push({ id: target.id, remove: true })
+      } else if (kind === 'edit') {
+        const target = byId.get(String(candidate.id || ''))
+        if (!target) continue
+        const patch = { id: target.id }
+        if (STATUSES.has(candidate.status)) patch.status = candidate.status
+        if (typeof candidate.percent === 'number' && Number.isFinite(candidate.percent)) patch.percent = Math.max(0, Math.min(100, Math.round(candidate.percent)))
+        for (const field of ['current', 'next', 'note']) {
+          if (typeof candidate[field] === 'string') patch[field] = text(candidate[field], field === 'note' ? MAX_NOTE : MAX_TEXT) || ''
+        }
+        if (Object.keys(patch).length > 1) changes.push(patch)
+      }
+    }
+    return { count: changes.length, changes, ackUserRevision }
+  }
+
+  function applyAssistantRoundDraft(sid, proposal, a) {
+    if (a.authority !== 'rounds' && a.authority !== 'both') return
+    const round = isObject(proposal.round) ? proposal.round : {}
+    const status = ['continue', 'complete', 'blocked'].includes(String(round.status)) ? String(round.status) : 'continue'
+    const bits = [`建议状态：${status}`]
+    if (typeof round.summary === 'string' && round.summary.trim()) bits.push(`摘要：${text(round.summary, 240)}`)
+    if (Array.isArray(round.evidence) && round.evidence.length) bits.push(`证据：${round.evidence.slice(0, 4).map((e) => String(e).slice(0, 120)).join('；')}`)
+    if (Array.isArray(round.nextSteps) && round.nextSteps.length) bits.push(`下一步：${round.nextSteps.slice(0, 4).map((e) => String(e).slice(0, 120)).join('；')}`)
+    if (status === 'blocked' && typeof round.blocker === 'string' && round.blocker.trim()) bits.push(`阻塞：${text(round.blocker, 240)}`)
+    const o = obsOf(sid)
+    o.roundDraft = bits.join(' · ').slice(0, 400)
+  }
+
   async function maybeAskAssistant(sid, at) {
+    const a = liveAssistant()
     if (!assistantReady() || !boardHasWork(sid)) return
     const o = obsOf(sid)
     if (!modelIsLate(sid, at) && o.stepsSinceBoard < cfg.observer.maxIdleSteps) return
-    if (at - o.lastAssistantAt < cfg.assistant.minIntervalMs) return
-    if (o.assistantCalls >= cfg.assistant.maxCallsPerTurn) return
+    if (at - o.lastAssistantAt < Number(a.minIntervalMs || 0)) return
+    if (o.assistantCalls >= Number(a.maxCallsPerTurn || 1)) return
     const state = states.get(sid)
     if (!state) return
     o.assistantCalls += 1
@@ -1397,56 +1467,59 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     const lastOutput = o.outputs[o.outputs.length - 1]
     const files = Array.isArray(o.files) ? o.files.slice(-4).map((f) => f.path) : []
     const lines = [
+      `目标：${state.goal && state.goal.phase === 'active' ? JSON.stringify(state.goal.objective) : '(无)'}`,
       ...renderChecklist(state, cfg.observer.maxItems),
       lastOutput ? `最近输出：${lastOutput.text}` : '最近输出：—',
       o.tools.length ? `最近动作：${o.tools.slice(-cfg.observer.maxTools).map((x) => x.name).join(' → ')}` : '最近动作：—',
       files.length ? `最近改动：${files.join(' · ')}` : '最近改动：—',
     ]
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), Math.max(2000, Number(cfg.assistant.timeoutMs) || 20000))
+    const timer = setTimeout(() => controller.abort(), Math.max(2000, Number(a.timeoutMs) || 20000))
     try {
-      const base = String(cfg.assistant.baseUrl || '').replace(/\/+$/, '')
-      const response = await fetch(`${base}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(String(cfg.assistant.apiKey || '') !== '' ? { authorization: `Bearer ${cfg.assistant.apiKey}` } : {}),
-        },
-        body: JSON.stringify({
-          model: cfg.assistant.model,
-          temperature: 0,
-          max_tokens: 300,
-          messages: [
-            { role: 'system', content: ASSISTANT_SYSTEM },
-            { role: 'user', content: lines.join('\n') },
-          ],
-        }),
-        signal: controller.signal,
-      })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const body = await response.json()
-      const proposal = parseProposal(body?.choices?.[0]?.message?.content ?? '')
+      let raw = ''
+      if (a.mode === 'registered') {
+        // 宿主 llm.stream：把 chunk 拼成正文（兼容 content/text 字段与 delta 形态）。
+        const stream = llm.stream({
+          provider: String(a.provider),
+          model: String(a.model),
+          messages: [{ role: 'system', content: ASSISTANT_SYSTEM }, { role: 'user', content: lines.join('\n') }],
+        })
+        for await (const chunk of stream) {
+          if (chunk && typeof chunk.content === 'string') raw += chunk.content
+          else if (chunk && typeof chunk.text === 'string') raw += chunk.text
+          else if (chunk && chunk.delta && typeof chunk.delta === 'string') raw += chunk.delta
+          if (controller.signal.aborted) break
+        }
+      } else {
+        const base = String(a.baseUrl || '').replace(/\/+$/, '')
+        const response = await fetch(`${base}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(String(a.apiKey || '') !== '' ? { authorization: `Bearer ${a.apiKey}` } : {}),
+          },
+          body: JSON.stringify({
+            model: a.model,
+            temperature: 0,
+            max_tokens: 600,
+            messages: [{ role: 'system', content: ASSISTANT_SYSTEM }, { role: 'user', content: lines.join('\n') }],
+          }),
+          signal: controller.signal,
+        })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        const body = await response.json()
+        raw = String(body?.choices?.[0]?.message?.content ?? '')
+      }
+      const proposal = parseProposal(raw)
       if (!proposal) throw new Error('proposal-unparsable')
       o.assistantError = ''
       o.assistantNote = String(proposal.note || '').slice(0, 200)
-      if (cfg.assistant.autoApply !== false && Array.isArray(proposal.changes) && proposal.changes.length > 0) {
-        const byId = new Map(state.items.map((item) => [item.id, item]))
-        const changes = []
-        for (const candidate of proposal.changes.slice(0, 10)) {
-          if (!isObject(candidate)) continue
-          const target = byId.get(String(candidate.id || ''))
-          if (!target) continue
-          const patch = { id: target.id }
-          if (typeof candidate.current === 'string') patch.current = candidate.current
-          if (typeof candidate.next === 'string') patch.next = candidate.next
-          if (typeof candidate.percent === 'number' && Number.isFinite(candidate.percent)) {
-            patch.percent = Math.max(0, Math.min(100, Math.round(candidate.percent)))
-          }
-          if (Object.keys(patch).length > 1) changes.push(patch)
-        }
-        if (changes.length > 0) {
-          await applyChanges({ sessionId: sid, changes, origin: 'assistant' })
-        }
+      // 轮次草案：写进 observers，供下一次 followup 的 <progress_goal_round> 拼入。
+      applyAssistantRoundDraft(sid, proposal, a)
+      // 槽位管理：护栏后落地，每项 updatedBy='assistant'（applyChanges 用 origin 保证）。
+      if (a.autoApply !== false && (a.authority === 'slots' || a.authority === 'both')) {
+        const g = applyAssistantSlotChanges(state, sid, proposal, a)
+        if (g.count > 0) await applyChanges({ sessionId: sid, changes: g.changes, origin: 'assistant', ackUserRevision: g.ackUserRevision })
       }
     } catch (err) {
       o.assistantError = err instanceof Error ? err.message : String(err)
@@ -1508,6 +1581,7 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
       lines.push(`⚠ 进度已滞后（${synced}${idleMin >= 1 ? '，' + idleMin + ' 分钟' : ''}）：先调用 progress_update 同步再继续；无变化就传 changes=[]。观察者已用最近动作自动刷新 current（updatedBy=observer），但状态/百分比仍需你确认。`)
     }
     if (o.assistantNote) lines.push(`助手审查：${o.assistantNote}`)
+    if (o.roundDraft) lines.push(`助手轮次草案（仅供参考）：${o.roundDraft}`)
     if (o.assistantError) lines.push(`助手审查失败：${o.assistantError}（仅影响审查建议，不阻断主流程）`)
     return `<progress-observer revision="${state.revision}" synced="${synced}">\n${lines.join('\n')}\n</progress-observer>`
   }
@@ -1999,8 +2073,9 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
         markLineage(task, session)
         const pendingText = userTextMap.get(sid) || ''
         task.open = true
-        // 辅助 LLM 的每回合配额：开新回合重置
+        // 辅助 LLM 的每回合配额：开新回合重置（轮次草案不跨回合复用）
         obsOf(sid).assistantCalls = 0
+        obsOf(sid).roundDraft = ''
         if (!task.active) {
           task.active = true
           task.startedAt = now()
