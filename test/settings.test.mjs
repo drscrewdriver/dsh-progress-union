@@ -62,12 +62,15 @@ test('Config：外层对象不得自己标 volatile（嵌套 volatile 会被宿�
   }
 })
 
-test('客户端：设置卡注册到 settings.section 且走 configForms 句柄', () => {
+test('客户端：设置卡双座位（settings.section + plugins.bundle.config）且走 configForms 句柄', () => {
   const file = new URL('../client.js', import.meta.url).pathname.replace(/^\//, '')
   const src = fs.readFileSync(file, 'utf8')
-  assert.match(src, /name: 'settings\.section'/, '必须注册 settings.section 槽')
+  assert.match(src, /registerSettingsSeat\('settings\.section'/, '必须注册 settings.section 槽')
   assert.match(src, /id: 'dsh-progress-union'/, '分节 id 必须固定')
+  assert.match(src, /registerSettingsSeat\('plugins\.bundle\.config'/, 'bundle 详情页也要有配置卡（keyed by 包名）')
+  assert.match(src, /key: 'dsh-progress-union'/, 'bundle 座位 key 必须是包名')
   assert.match(src, /configForms/, '必须经宿主 configForms 读写配置')
   assert.match(src, /function ProgressUnionSettings\(/, '设置卡组件必须在')
   assert.match(src, /scope\.subscribe/, '设置卡要订阅句柄快照')
+  assert.match(src, /function ensureUnionSettingsStyle\(/, '样式要注入 document.head，否则设置页里裸奔')
 })

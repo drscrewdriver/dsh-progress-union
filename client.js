@@ -249,6 +249,15 @@ window.__ModuleLoader__.load({
       setFailed: '保存失败',
       setReadOnly: '当前 config 不可写',
       setNoScope: '此宿主未提供设置写入面（configForms），只能从 profile 的 cordis.patch.yml 改配置。',
+      setLive: '运行时·可编辑',
+      setTopHint: '改完即时落盘，无需重启',
+      setLlmBadge: '监控审查',
+      setObserverBadge: '监控',
+      setApiBadge: '只读',
+      setSave: '保存',
+      setSaving: '保存中…',
+      setReset: '撤销',
+      setDirty: '有未保存的改动',
       setApiService: 'service',
       setApiAnchor: 'HTTP',
       setApiSnapshot: '快照',
@@ -398,6 +407,15 @@ window.__ModuleLoader__.load({
       setFailed: 'Save failed',
       setReadOnly: 'Current config is not writable',
       setNoScope: 'This host exposes no settings write surface (configForms); edit the profile cordis.patch.yml instead.',
+      setLive: 'Runtime editable',
+      setTopHint: 'Changes persist immediately, no restart needed',
+      setLlmBadge: 'Audit',
+      setObserverBadge: 'Monitor',
+      setApiBadge: 'Read-only',
+      setSave: 'Save',
+      setSaving: 'Saving…',
+      setReset: 'Discard',
+      setDirty: 'Unsaved changes',
       setApiService: 'service',
       setApiAnchor: 'HTTP',
       setApiSnapshot: 'Snapshot',
@@ -1547,56 +1565,197 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ── 设置分节（顶层 settings.section，与 dsh-browser-cdp 同式）─────────────
-    // 宿主不会凭导出的 Config 自动生成表单：设置面必须由客户端注册到
-    // `settings.section` 槽，数据臂走宿主原生 `configForms` 句柄
-    // （get(entryId) → subscribe/getSnapshot/set），写值带 revision、改完即生效。
-    function unionFormsScope(ctx) {
-      let forms
-      try {
-        forms = typeof ctx.get === 'function' ? ctx.get('configForms') : undefined
-      } catch (_error) {
-        forms = undefined
-      }
+// ── 设置面：顶层 settings.section + 插件页 plugins.bundle.config 双座位 ──────
+    // 宿主的既有规则（与 dsh-brief-sidebar / dsh-browser-cdp 一致）：
+    //  · 顶层 `settings.section`：独立导航分节，id 自定义；
+    //  · `plugins.bundle.config`：bundle 详情页配置卡，key 必须是 **包名**；
+    //  · `configForms` 可能在客户端 apply 之后才就绪 → 句柄走 deferred inject，
+    //    两个座位共用同一句柄，卡内自行降级为空态提示（不静默吞掉入口）。
+    let unionConfigForms
+    const unionFormsListeners = new Set()
+
+    function unionFormsScope() {
+      const forms = unionConfigForms
       if (!forms || typeof forms.get !== 'function') return undefined
       // entry id 在 cordis.patch.yml 里是 `progress-union`，包名是 `dsh-progress-union`，两个都试。
       for (const id of ['progress-union', 'dsh-progress-union']) {
-        let scope
         try {
-          scope = forms.get(id)
+          const scope = forms.get(id)
+          if (scope && typeof scope.getSnapshot === 'function' && typeof scope.subscribe === 'function' && typeof scope.set === 'function') return scope
         } catch (_error) {
-          scope = undefined
+          // entry 尚未注册时跳过
         }
-        if (scope && typeof scope.getSnapshot === 'function' && typeof scope.subscribe === 'function' && typeof scope.set === 'function') return scope
       }
       return undefined
     }
 
-    function SettingsRow(props) {
+    function bindUnionConfigForms(ctx) {
+      try {
+        ctx.inject(['configForms'], (scope) => {
+          unionConfigForms = scope && scope.configForms
+          for (const fn of unionFormsListeners) {
+            try {
+              fn()
+            } catch (_error) {
+              // 监听者卸载期失败无关紧要
+            }
+          }
+        })
+      } catch (_error) {
+        // 宿主无 ctx.inject：卡退化为只读提示
+      }
+    }
+
+    function useUnionScope() {
+      const [scope, setScope] = useState(() => unionFormsScope())
+      useEffect(() => {
+        const sync = () => setScope(unionFormsScope())
+        unionFormsListeners.add(sync)
+        sync()
+        return () => {
+          unionFormsListeners.delete(sync)
+        }
+      }, [])
+      return scope
+    }
+
+    // 样式必须注入 document.head：设置页 / 插件详情页是另一个 React 根，
+    // 数据面板里的 <style> 到不了那里（上一版设置卡「裸奔」的原因）。
+    const SETTINGS_STYLE_ID = 'dsh-progress-union-settings-style'
+    const SETTINGS_CSS = `
+      .dsu-set { display: grid; gap: 14px; font-size: 12px; color: inherit; }
+      .dsu-topline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      .dsu-chip { font-size: 11px; line-height: 1.6; padding: 1px 9px; border-radius: 999px; background: rgba(47,111,237,.12); color: #2f6fed; white-space: nowrap; }
+      .dsu-chip-warn { background: rgba(217,119,6,.14); color: #b45309; }
+      .dsu-card { border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.22)); border-radius: 12px; background: var(--dsw-alias-bg-layer-1, rgba(128,128,128,.04)); overflow: hidden; }
+      .dsu-card-head { display: flex; align-items: center; gap: 8px; padding: 12px 14px; cursor: pointer; user-select: none; }
+      .dsu-card-head:hover { background: rgba(128,128,128,.06); }
+      .dsu-card-title { font-size: 13px; font-weight: 650; }
+      .dsu-card-badge { font-size: 10px; line-height: 1.7; padding: 0 7px; border-radius: 999px; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.25)); opacity: .72; white-space: nowrap; }
+      .dsu-card-chev { margin-left: auto; opacity: .55; font-size: 11px; }
+      .dsu-card-body { display: grid; gap: 10px; padding: 2px 14px 14px; }
+      .dsu-hint { font-size: 11px; line-height: 1.6; opacity: .66; }
+      .dsu-row { display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 4px 12px; align-items: center; }
+      .dsu-row-hint { grid-column: 2; }
+      .dsu-label { opacity: .84; }
+      .dsu-control { min-width: 0; display: flex; align-items: center; gap: 8px; }
+      .dsu-input, .dsu-select { flex: 1; min-width: 0; padding: 7px 10px; font: inherit; font-size: 12px; color: inherit; background: var(--dsw-alias-bg-base, rgba(255,255,255,.04)); border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3)); border-radius: 8px; outline: none; transition: border-color .15s, box-shadow .15s; }
+      .dsu-input:focus, .dsu-select:focus { border-color: #2f6fed; box-shadow: 0 0 0 3px rgba(47,111,237,.14); }
+      .dsu-input[disabled] { opacity: .6; }
+      .dsu-unit { flex: none; font-size: 11px; opacity: .6; min-width: 18px; }
+      .dsu-switch { position: relative; display: inline-flex; width: 38px; height: 21px; flex: none; }
+      .dsu-switch input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+      .dsu-switch > i { position: absolute; inset: 0; border-radius: 999px; background: rgba(128,128,128,.38); transition: background .16s; pointer-events: none; }
+      .dsu-switch > i::after { content: ''; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.24); transition: transform .16s; }
+      .dsu-switch input:checked + i { background: #2f6fed; }
+      .dsu-switch input:checked + i::after { transform: translateX(17px); }
+      .dsu-seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 9px; background: rgba(128,128,128,.14); }
+      .dsu-seg > button { appearance: none; border: 0; background: transparent; color: inherit; font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 7px; cursor: pointer; opacity: .72; white-space: nowrap; }
+      .dsu-seg > button[data-on="true"] { background: var(--dsw-alias-bg-base, #fff); box-shadow: 0 1px 3px rgba(0,0,0,.14); opacity: 1; font-weight: 600; }
+      .dsu-actions { display: flex; align-items: center; gap: 10px; padding-top: 2px; }
+      .dsu-actions .dsu-spacer { flex: 1; }
+      .dsu-btn { appearance: none; font: inherit; font-size: 12px; padding: 6px 14px; border-radius: 8px; cursor: pointer; border: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,.3)); background: transparent; color: inherit; }
+      .dsu-btn:disabled { opacity: .45; cursor: default; }
+      .dsu-btn-primary { background: #2f6fed; border-color: #2f6fed; color: #fff; font-weight: 600; }
+      .dsu-api { display: grid; gap: 6px; font-size: 11px; }
+      .dsu-api > div { display: flex; gap: 8px; padding: 6px 9px; border-radius: 7px; background: rgba(128,128,128,.09); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+      .dsu-api b { flex: none; font-family: inherit; font-weight: 600; opacity: .72; }
+      .dsu-empty { padding: 12px 14px; border-radius: 10px; border: 1px dashed var(--dsw-alias-border-l1, rgba(128,128,128,.35)); font-size: 12px; line-height: 1.6; opacity: .8; }
+    `
+
+    function ensureUnionSettingsStyle() {
+      try {
+        if (typeof document === 'undefined') return
+        if (document.getElementById(SETTINGS_STYLE_ID)) return
+        const el = document.createElement('style')
+        el.id = SETTINGS_STYLE_ID
+        el.textContent = SETTINGS_CSS
+        document.head.appendChild(el)
+      } catch (_error) {
+        // 无 DOM（SSR / 测试环境）时静默跳过
+      }
+    }
+
+    function SettingsSwitch(props) {
       return h(
-        'label',
-        { className: 'pb-set-row' },
-        h('span', { className: 'pb-set-label' }, props.label),
-        h('span', { className: 'pb-set-control' }, props.children),
-        props.hint ? h('span', { className: 'pb-set-hint' }, props.hint) : null,
+        'span',
+        { className: 'dsu-switch' },
+        h('input', { type: 'checkbox', checked: props.checked === true, disabled: props.disabled === true, onChange: (e) => props.onChange(e.target.checked) }),
+        h('i', null),
       )
     }
 
-    function SettingsGroup(props) {
+    function SettingsSegment(props) {
       return h(
-        'section',
-        { className: 'pb-set-group' },
-        h('div', { className: 'pb-set-group-title' }, props.title),
-        props.hint ? h('div', { className: 'pb-set-group-hint' }, props.hint) : null,
-        props.children,
+        'span',
+        { className: 'dsu-seg' },
+        props.options.map((opt) =>
+          h(
+            'button',
+            {
+              key: opt[0],
+              type: 'button',
+              'data-on': String(props.value === opt[0]),
+              disabled: props.disabled === true,
+              onClick: () => {
+                if (props.value !== opt[0]) props.onChange(opt[0])
+              },
+            },
+            opt[1],
+          ),
+        ),
+      )
+    }
+
+    function SettingsCard(props) {
+      const [open, setOpen] = useState(props.defaultOpen !== false)
+      return h(
+        'div',
+        { className: 'dsu-card' },
+        h(
+          'div',
+          {
+            className: 'dsu-card-head',
+            role: 'button',
+            tabIndex: 0,
+            onClick: () => setOpen((v) => !v),
+            onKeyDown: (e) => {
+              if (e && (e.key === 'Enter' || e.key === ' ')) setOpen((v) => !v)
+            },
+          },
+          h('span', { className: 'dsu-card-title' }, props.title),
+          props.badge ? h('span', { className: 'dsu-card-badge' }, props.badge) : null,
+          h('span', { className: 'dsu-card-chev' }, open ? '▾' : '▸'),
+        ),
+        open
+          ? h(
+              'div',
+              { className: 'dsu-card-body' },
+              props.hint ? h('div', { className: 'dsu-hint' }, props.hint) : null,
+              props.children,
+            )
+          : null,
+      )
+    }
+
+    function SettingsRow(props) {
+      return h(
+        'div',
+        { className: 'dsu-row' },
+        h('span', { className: 'dsu-label' }, props.label),
+        h('span', { className: 'dsu-control' }, props.children),
+        props.hint ? h('span', { className: 'dsu-hint dsu-row-hint' }, props.hint) : null,
       )
     }
 
     function ProgressUnionSettings(props) {
       const t = makeT(props)
-      const scope = props.scope
+      const scope = useUnionScope()
       const [snap, setSnap] = useState(null)
+      const [draft, setDraft] = useState({})
       const [status, setStatus] = useState('')
+      const [busy, setBusy] = useState(false)
+
       useEffect(() => {
         if (!scope) return undefined
         let alive = true
@@ -1605,7 +1764,7 @@ window.__ModuleLoader__.load({
           try {
             setSnap(scope.getSnapshot())
           } catch (_error) {
-            // 句柄随时会随 entry 重载重建；读失败就保持上一帧
+            // 句柄随 entry 重载重建；读失败保持上一帧
           }
         }
         read()
@@ -1629,94 +1788,169 @@ window.__ModuleLoader__.load({
 
       const value = (snap && snap.value) || {}
       const writable = Boolean(scope) && (!snap || snap.writable !== false)
-      const assistant = value.assistant && typeof value.assistant === 'object' ? value.assistant : {}
-      const observer = value.observer && typeof value.observer === 'object' ? value.observer : {}
+      const asObject = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {})
+      const assistant = asObject(value.assistant)
+      const observer = asObject(value.observer)
 
-      const write = async (field, next) => {
+      // 文本/数字走草稿（避免逐字符写盘），开关与分段直接落盘（即时生效）。
+      const readField = (group, key, fallback) => {
+        const bucket = draft[group]
+        if (bucket && Object.prototype.hasOwnProperty.call(bucket, key)) return bucket[key]
+        const stored = (group === 'assistant' ? assistant : observer)[key]
+        return stored === undefined || stored === null ? fallback : stored
+      }
+      const setDraftField = (group, key, v) => setDraft((prev) => ({ ...prev, [group]: { ...(prev[group] || {}), [key]: v } }))
+      const dirtyKeys = (group) => Object.keys(draft[group] || {})
+
+      const commit = async (group, patch) => {
         if (!scope) {
           setStatus(t('setNoScope'))
-          return
+          return false
         }
         if (!writable) {
           setStatus(t('setReadOnly'))
-          return
+          return false
         }
+        setBusy(true)
         try {
-          const ok = await scope.set(field, next)
+          const ok = await scope.set(group, patch)
           setStatus(ok === false ? t('setFailed') : t('setSaved'))
+          return ok !== false
         } catch (_error) {
           setStatus(t('setFailed'))
+          return false
+        } finally {
+          setBusy(false)
         }
       }
-      const putAssistant = (key, v) => void write('assistant', { ...assistant, [key]: v })
-      const putObserver = (key, v) => void write('observer', { ...observer, [key]: v })
+      const commitNow = (group, base, key, next) => void commit(group, { ...base, [key]: next })
+      const flush = async () => {
+        const aKeys = dirtyKeys('assistant')
+        const oKeys = dirtyKeys('observer')
+        if (aKeys.length) await commit('assistant', { ...assistant, ...draft.assistant })
+        if (oKeys.length) await commit('observer', { ...observer, ...draft.observer })
+        setDraft({})
+      }
 
-      const textOf = (v) => (v === undefined || v === null ? '' : String(v))
-      const inputText = (v, onChange) => h('input', { type: 'text', value: textOf(v), onChange: (e) => onChange(e.target.value) })
-      const inputSecret = (v, placeholder, onChange) => h('input', { type: 'password', value: textOf(v), placeholder, onChange: (e) => onChange(e.target.value) })
-      const inputNum = (v, step, onChange) => h('input', { type: 'number', step, value: Number.isFinite(Number(v)) ? Number(v) : 0, onChange: (e) => onChange(Number(e.target.value)) })
-      const inputBool = (v, fallback, onChange) => h('input', { type: 'checkbox', checked: v === undefined ? fallback : v !== false, onChange: (e) => onChange(e.target.checked) })
-      const inputSelect = (v, options, onChange) =>
-        h(
-          'select',
-          { value: textOf(v), onChange: (e) => onChange(e.target.value) },
-          options.map((opt) => h('option', { key: opt[0], value: opt[0] }, opt[1])),
-        )
+      const textInput = (group, key, fallback, placeholder) =>
+        h('input', {
+          className: 'dsu-input',
+          type: 'text',
+          value: String(readField(group, key, fallback) ?? ''),
+          placeholder: placeholder || '',
+          disabled: !writable,
+          onChange: (e) => setDraftField(group, key, e.target.value),
+        })
+      const secretInput = (group, key, placeholder) =>
+        h('input', {
+          className: 'dsu-input',
+          type: 'password',
+          value: String(readField(group, key, '') ?? ''),
+          placeholder: placeholder || '',
+          disabled: !writable,
+          onChange: (e) => setDraftField(group, key, e.target.value),
+        })
+      const numberInput = (group, key, fallback, step, unit) => [
+        h('input', {
+          key: 'input',
+          className: 'dsu-input',
+          type: 'number',
+          step,
+          value: String(readField(group, key, fallback)),
+          disabled: !writable,
+          onChange: (e) => setDraftField(group, key, Number(e.target.value)),
+        }),
+        unit ? h('span', { key: 'unit', className: 'dsu-unit' }, unit) : null,
+      ]
+      const switchInput = (group, base, key, fallback) =>
+        h(SettingsSwitch, {
+          checked: readField(group, key, fallback) !== false,
+          disabled: !writable || busy,
+          onChange: (v) => {
+            setDraftField(group, key, v)
+            commitNow(group, base, key, v)
+          },
+        })
+      const segmentInput = (group, base, key, fallback, options) =>
+        h(SettingsSegment, {
+          value: readField(group, key, fallback),
+          disabled: !writable || busy,
+          options,
+          onChange: (v) => {
+            setDraftField(group, key, v)
+            commitNow(group, base, key, v)
+          },
+        })
+
+      const hasDirty = dirtyKeys('assistant').length > 0 || dirtyKeys('observer').length > 0
+      const mode = readField('assistant', 'mode', '')
+      const authority = readField('assistant', 'authority', 'both')
 
       return h(
         'div',
-        { className: 'pb-set' },
-        scope ? null : h('div', { className: 'pb-set-banner' }, t('setNoScope')),
+        { className: 'dsu-set' },
         h(
-          SettingsGroup,
-          { title: t('setLlmGroup'), hint: t('setLlmHint') },
+          'div',
+          { className: 'dsu-topline' },
+          h('span', { className: writable ? 'dsu-chip' : 'dsu-chip dsu-chip-warn' }, writable ? t('setLive') : t('setReadOnly')),
+          h('span', { className: 'dsu-hint' }, writable ? t('setTopHint') : t('setNoScope')),
+        ),
+        h(
+          SettingsCard,
+          { title: t('setLlmGroup'), badge: t('setLlmBadge'), hint: t('setLlmHint') },
           h(SettingsRow, { label: t('setMode') },
-            inputSelect(assistant.mode || '', [['', t('setModeOff')], ['registered', t('setModeRegistered')], ['direct', t('setModeDirect')]], (v) => putAssistant('mode', v))),
-          h(SettingsRow, { label: t('setProvider'), hint: t('setProviderHint') },
-            inputText(assistant.provider || '', (v) => putAssistant('provider', v))),
-          h(SettingsRow, { label: t('setModel') },
-            inputText(assistant.model || '', (v) => putAssistant('model', v))),
-          h(SettingsRow, { label: t('setBaseUrl') },
-            inputText(assistant.baseUrl || '', (v) => putAssistant('baseUrl', v))),
-          h(SettingsRow, { label: t('setApiKey'), hint: t('setApiKeyHint') },
-            inputSecret('', assistant.hasApiKey ? '••••••' : '', (v) => putAssistant('apiKey', v))),
-          h(SettingsRow, { label: t('setAuthority') },
-            inputSelect(assistant.authority || 'both', [['both', t('setAuthorityBoth')], ['slots', t('setAuthoritySlots')], ['rounds', t('setAuthorityRounds')]], (v) => putAssistant('authority', v))),
-          h(SettingsRow, { label: t('setInterval'), hint: t('setIntervalHint') },
-            inputNum(assistant.minIntervalMs === undefined ? 90000 : assistant.minIntervalMs, 1000, (v) => putAssistant('minIntervalMs', v))),
-          h(SettingsRow, { label: t('setAutoApply') },
-            inputBool(assistant.autoApply, true, (v) => putAssistant('autoApply', v))),
+            segmentInput('assistant', assistant, 'mode', '', [['', t('setModeOff')], ['registered', t('setModeRegistered')], ['direct', t('setModeDirect')]])),
+          mode === 'registered'
+            ? h(SettingsRow, { label: t('setProvider'), hint: t('setProviderHint') }, textInput('assistant', 'provider', '', 'local-35b'))
+            : null,
+          h(SettingsRow, { label: t('setModel') }, textInput('assistant', 'model', '', mode === 'direct' ? 'qwen2.5-3b' : 'Qwen3.6-35B-A3B')),
+          mode === 'direct' ? h(SettingsRow, { label: t('setBaseUrl') }, textInput('assistant', 'baseUrl', '', 'http://127.0.0.1:8000/v1')) : null,
+          mode === 'direct' ? h(SettingsRow, { label: t('setApiKey'), hint: t('setApiKeyHint') }, secretInput('assistant', 'apiKey', assistant.hasApiKey ? '••••••' : '')) : null,
+          mode === ''
+            ? null
+            : h(SettingsRow, { label: t('setAuthority') },
+                segmentInput('assistant', assistant, 'authority', 'both', [['both', t('setAuthorityBoth')], ['slots', t('setAuthoritySlots')], ['rounds', t('setAuthorityRounds')]])),
+          mode === '' ? null : h(SettingsRow, { label: t('setInterval'), hint: t('setIntervalHint') }, numberInput('assistant', 'minIntervalMs', 90000, 1000, 'ms')),
+          mode === '' ? null : h(SettingsRow, { label: t('setAutoApply') }, switchInput('assistant', assistant, 'autoApply', true)),
         ),
         h(
-          SettingsGroup,
-          { title: t('setObserverGroup'), hint: t('setObserverHint') },
-          h(SettingsRow, { label: t('setObserverEnabled') },
-            inputBool(observer.enabled, true, (v) => putObserver('enabled', v))),
-          h(SettingsRow, { label: t('setMaxIdleSteps') },
-            inputNum(observer.maxIdleSteps === undefined ? 6 : observer.maxIdleSteps, 1, (v) => putObserver('maxIdleSteps', v))),
-          h(SettingsRow, { label: t('setMaxIdleMs') },
-            inputNum(observer.maxIdleMs === undefined ? 180000 : observer.maxIdleMs, 1000, (v) => putObserver('maxIdleMs', v))),
-          h(SettingsRow, { label: t('setAutoSyncCurrent') },
-            inputBool(observer.autoSyncCurrent, true, (v) => putObserver('autoSyncCurrent', v))),
-          h(SettingsRow, { label: t('setAutoSyncThrottleMs') },
-            inputNum(observer.autoSyncThrottleMs === undefined ? 60000 : observer.autoSyncThrottleMs, 1000, (v) => putObserver('autoSyncThrottleMs', v))),
-          h(SettingsRow, { label: t('setMaxItems') },
-            inputNum(observer.maxItems === undefined ? 12 : observer.maxItems, 1, (v) => putObserver('maxItems', v))),
+          SettingsCard,
+          { title: t('setObserverGroup'), badge: t('setObserverBadge'), hint: t('setObserverHint') },
+          h(SettingsRow, { label: t('setObserverEnabled') }, switchInput('observer', observer, 'enabled', true)),
+          h(SettingsRow, { label: t('setMaxIdleSteps') }, numberInput('observer', 'maxIdleSteps', 6, 1, '步')),
+          h(SettingsRow, { label: t('setMaxIdleMs') }, numberInput('observer', 'maxIdleMs', 180000, 1000, 'ms')),
+          h(SettingsRow, { label: t('setAutoSyncCurrent') }, switchInput('observer', observer, 'autoSyncCurrent', true)),
+          h(SettingsRow, { label: t('setAutoSyncThrottleMs') }, numberInput('observer', 'autoSyncThrottleMs', 60000, 1000, 'ms')),
+          h(SettingsRow, { label: t('setMaxItems') }, numberInput('observer', 'maxItems', 12, 1, '项')),
         ),
         h(
-          SettingsGroup,
-          { title: t('setApiGroup'), hint: t('setApiHint') },
-          h('div', { className: 'pb-set-api' },
-            h('div', null, h('b', null, t('setApiService')), 'ctx.get(\'progressAnchor\').get(sessionId) / .list()'),
+          SettingsCard,
+          { title: t('setApiGroup'), badge: t('setApiBadge'), hint: t('setApiHint'), defaultOpen: false },
+          h('div', { className: 'dsu-api' },
+            h('div', null, h('b', null, t('setApiService')), "ctx.get('progressAnchor').get(sessionId) / .list()"),
             h('div', null, h('b', null, t('setApiAnchor')), 'GET /progress-union/anchor?sessionId=<id>'),
             h('div', null, h('b', null, t('setApiSnapshot')), 'GET /progress-union/snapshot?sessionId=<id>'),
             h('div', null, h('b', null, t('setApiStatus')), 'GET /dsh-progress/status?sessionId=<id>'),
           ),
         ),
-        status ? h('div', { className: 'pb-set-status' }, status) : null,
+        h(
+          'div',
+          { className: 'dsu-actions' },
+          h('button', { type: 'button', className: 'dsu-btn dsu-btn-primary', disabled: !hasDirty || busy || !writable, onClick: () => void flush() }, busy ? t('setSaving') : t('setSave')),
+          h('button', {
+            type: 'button',
+            className: 'dsu-btn',
+            disabled: !hasDirty || busy,
+            onClick: () => {
+              setDraft({})
+              setStatus('')
+            },
+          }, t('setReset')),
+          h('span', { className: 'dsu-hint dsu-spacer' }, hasDirty ? t('setDirty') : ''),
+          status ? h('span', { className: 'dsu-hint' }, status) : null,
+        ),
       )
     }
-
     function ProgressSidePanel(props) {
       const t = makeT(props)
       const { sessionId } = props
@@ -2439,26 +2673,31 @@ window.__ModuleLoader__.load({
 
         const t = ctx.locale.bind(NS)
 
-        // 独立设置分节：顶层 `settings.section`（与记忆/模型/插件并列）。
-        // order 215 接在宿主内置分节之后；旧宿主没声明该槽时 inject 空转，
-        // 面板与迷你条不受影响（不靠版本号判断，只靠槽位存在性）。
-        const settingsScope = unionFormsScope(ctx)
-        ctx.effect(
-          () =>
-            ctx.slots.inject('settings.section', () =>
-              ctx.slots.register(
-                {
-                  name: 'settings.section',
-                  id: 'dsh-progress-union',
-                  order: 215,
-                  locale: NS,
-                  label: () => t('setTitle'),
-                  inject: () => ({ scope: settingsScope }),
-                },
-                ProgressUnionSettings,
-              ),
+        // 双座位注册：顶层设置分节（settings.section）+ 插件详情页配置卡
+        // （plugins.bundle.config，keyed by **包名**）。
+        // configForms 可能在 apply 之后才就绪 → 走 deferred inject 捕获句柄，
+        // 卡内自己订阅句柄并重取 scope，所以两个座位都可以先注空 prop。
+        bindUnionConfigForms(ctx)
+        ensureUnionSettingsStyle()
+        const registerSettingsSeat = (seat, options) =>
+          ctx.slots.inject(seat, () =>
+            ctx.slots.register(
+              {
+                name: seat,
+                ...options,
+                locale: NS,
+                inject: () => ({}),
+              },
+              ProgressUnionSettings,
             ),
+          )
+        ctx.effect(
+          () => registerSettingsSeat('settings.section', { id: 'dsh-progress-union', order: 215, label: () => t('setTitle') }),
           'progress-union: settings section',
+        )
+        ctx.effect(
+          () => registerSettingsSeat('plugins.bundle.config', { key: 'dsh-progress-union', order: 15 }),
+          'progress-union: bundle config card',
         )
 
         const wakeAgent = (sessionId, text) => {

@@ -14,7 +14,7 @@ npm i dsh-progress-union          # 走 npm 版本号
 # 或本地开发：pnpm --dir <profile> add file:<repo>/dsh-progress-union-<ver>.tgz
 ```
 
-装好后在 profile 的 `dsh.profile.bundles` 里挂上 `dsh-progress-union`，重启宿主加载；**所有配置面在设置页的独立分节「进度板」**（与记忆 / 模型 / 插件并列，由客户端注册 `settings.section` 槽、经宿主 `configForms` 读写，改完即生效、无需重启）；也可在 profile 的 `cordis.patch.yml` 里写 `config:` 作部署面默认值。
+装好后在 profile 的 `dsh.profile.bundles` 里挂上 `dsh-progress-union`，重启宿主加载；**配置面有两个入口**：设置页左侧的独立分节「进度板」（与记忆 / 模型 / 插件并列），以及插件详情页（bundle 设置页）里的同名配置卡。两处是同一张卡，经宿主 `configForms` 句柄读写；文本/数字改完点「保存」，开关与分段即时落盘，均无需重启。也可在 profile 的 `cordis.patch.yml` 里写 `config:` 作部署面默认值。
 
 ## 它解决什么
 
@@ -120,7 +120,7 @@ observer:
 
 观察者默认是**规则版（零 LLM 费用）**。可选的辅助模型会把"清单 + 最近输出 + 最近动作 + 最近改动"交给一个小模型做审查：
 
-**配置位置：设置 → 进度板**（分节内三组：辅助 LLM / 观察者 / 只读 API；观察者的滞后阈值也在这张卡里）。
+**配置位置：设置 → 进度板**（或插件详情页的同名卡片）。卡内三组可折叠：辅助 LLM / 观察者 / 只读 API；观察者的滞后阈值也在这张卡里。
 
 ```yaml
 assistant:
