@@ -2624,6 +2624,42 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     )
   }
 
+  // —— 模型侧 progress_goal_report 工具（报告轮次状态；助手草案不自动调这里）——
+  ctx.effect(
+    () =>
+      tools.register({
+        name: 'progress_goal_report',
+        description:
+          '在 /progress-goal 续轮里报告本轮状态。complete 需 evidence 且进度板已全部完成；blocked 需 blocker（连续 3 轮同因才落 blocked）；continue 表示仍在推进。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            status: { type: 'string', enum: ['continue', 'complete', 'blocked'] },
+            summary: { type: 'string' },
+            evidence: { type: 'array', items: { type: 'string' } },
+            nextSteps: { type: 'array', items: { type: 'string' } },
+            blocker: { type: 'string' },
+          },
+          required: ['status'],
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean' }, goal: { type: 'object', additionalProperties: true } } },
+          render(_args, value) {
+            return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
+          },
+        },
+        async execute(args, exec) {
+          const agent = exec.agent
+          if (!agent) throw new Error('progress_goal_report 只能在 Agent 会话中调用')
+          if (!isObject(args)) throw new Error('参数必须是对象')
+          const view = await applyGoalReport(String(agent.session?.id ?? agent.id), args)
+          return { ok: true, goal: view }
+        },
+      }, { when: ({ agent }) => isEnabled(sessionOfAgent(agent)) }),
+    'progress-union: progress_goal_report tool',
+  )
+
   const agentDisposers = new Map()
   function bindAgentContext(agent) {
     const sessionId = sessionOfAgent(agent)
