@@ -2,6 +2,15 @@
 
 本项目的所有值得记录的变更都写在这里。版本号遵循语义化版本。
 
+## 0.1.8 (2026-11-26)
+
+**修复：registered 通道写错 DSH LLM 契约；配置面搬回宿主设置页。**
+
+- 事故：registered 模式把 system prompt 塞进 `messages[{role:'system'}]`、content 又传裸字符串，而 `llm.stream` 的 `GenerateOptions.system` 才是 adapter 映射到 provider system 槽的字段 → 请求实际没有 system，DeepSeek 回落到内置 “You are a helpful assistant.” 并把它当正文返回，`parseProposal` 失败只剩 `proposal-unparsable`（旧测试把 chunk 桩成 `{content}`，跟着一起错，没能拦住）。
+- 修复：改为 `system: ASSISTANT_SYSTEM` + `messages: [{ role: 'user', content: [{ type: 'text', text }] }]`，chunk 只认 `type === 'text-delta'`，`finish.reason` 非 stop/max-tokens 直接报错，空正文报 `assistant-empty`；并透传 `signal`。
+- 回归测试：锁定 system 必须在 `options.system`、`messages` 不得出现 `role:system`、content 必须是块数组。
+- 设置面：`Config.assistant` 改为**逐叶子 `.volatile()`**（整对象标 volatile 不会生成字段表单——这就是「设置 → 插件」里看不到辅助 LLM 配置的原因）；侧边栏不再放编辑表单，只留只读状态并指向设置页；新增「live ref 逐字段重读」测试。
+
 > 说明：0.1.0 是真实构建产物；0.1.1–0.1.6 由 0.1.0 → 最终态的可核验 diff 按功能块「逻辑分化重建」，每一版都只包含该版本描述的能力，源码逐版可执行；0.1.7 是发布工程面。
 
 ## 0.1.7 (2026-11-26)

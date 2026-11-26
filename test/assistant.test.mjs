@@ -149,13 +149,34 @@ test('节流与每回合配额：minIntervalMs 内不再发；新回合重置配
   }
 })
 
-test('registered 模式：走宿主 llm.stream，消费 chunk + 槽位管理 + 轮次草案', async () => {
+test('assistant 逐叶子 volatile：live ref 每回合重读，改值不需重启', async () => {
+  const ref = (getter) => ({ get: getter })
+  const live = { mode: 'direct', baseUrl: 'http://127.0.0.1:9999/v1', model: 'mini' }
+  const harness = createHarness({
+    config: {
+      assistant: {
+        mode: ref(() => live.mode),
+        baseUrl: ref(() => live.baseUrl),
+        model: ref(() => live.model),
+        minIntervalMs: ref(() => 0),
+      },
+    },
+  })
+  await harness.run()
+  const on = await snapshotOf(harness)
+  assert.equal(on.assistant.mode, 'direct')
+  assert.equal(on.assistant.enabled, true)
+  live.mode = ''
+  const off = await snapshotOf(harness)
+  assert.equal(off.assistant.enabled, false, '设置页关掉后下一次读即生效')
+})
+test('registered 模式：走宿主 llm.stream（system 走 options.system，content 为块数组），消费 text-delta + 槽位管理 + 轮次草案', async () => {
   const streamCalls = []
   const llm = {
     async *stream(options) {
       streamCalls.push(options)
-      // 第一段先占位；真实 id 在下面覆盖，这里先给一个失败的 JSON（不会被用）
-      yield { content: '{}' }
+      yield { type: 'text-delta', text: '{}' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
     },
   }
   const harness = createHarness({
@@ -168,15 +189,25 @@ test('registered 模式：走宿主 llm.stream，消费 chunk + 槽位管理 + �
   const itemId = added.changed[0].id
   llm.stream = async function* (options) {
     streamCalls.push(options)
-    yield { content: '{"board":{"changes":[' }
-    yield { content: `{"kind":"edit","id":"${itemId}","percent":75}` }
-    yield { content: ']},"round":{"status":"continue","summary":"推进中"},"note":"registered 校准"}' }
+    yield { type: 'text-delta', text: '{"board":{"changes":[' }
+    yield { type: 'text-delta', text: `{"kind":"edit","id":"${itemId}","percent":75}` }
+    yield { type: 'text-delta', text: ']},"round":{"status":"continue","summary":"推进中"},"note":"registered 校准"}' }
+    yield { type: 'finish', reason: { kind: 'stop' } }
   }
   for (let i = 0; i < 6; i++) harness.emit('step/start', {})
   await settle()
   assert.equal(streamCalls.length, 1, 'registered 走 llm.stream 而非 fetch')
   assert.equal(streamCalls[0].provider, 'local')
   assert.equal(streamCalls[0].model, 'qwen')
+  // 契约守卫（2026-11-26 事故回归）：system 必须在 options.system，不能藏在 messages 里，
+  // 否则 adapter 不映射 system 槽 → DeepSeek 回落到内置 "You are a helpful assistant."
+  assert.equal(typeof streamCalls[0].system, 'string')
+  assert.match(streamCalls[0].system, /progress assistant/, 'system 必须是 ASSISTANT_SYSTEM 正文')
+  assert.deepEqual(streamCalls[0].messages.map((m) => m.role), ['user'], 'messages 里不得出现 role:system')
+  const blocks = streamCalls[0].messages[0].content
+  assert.ok(Array.isArray(blocks), 'content 必须是 ContentBlock[]，不能是裸字符串')
+  assert.equal(blocks[0].type, 'text')
+  assert.match(blocks[0].text, /目标|\[~\]/, '输入正文必须带上板清单')
   const snap = await snapshotOf(harness)
   assert.equal(snap.items[0].percent, 75, '助手改了槽位')
   assert.equal(snap.items[0].updatedBy, 'assistant')

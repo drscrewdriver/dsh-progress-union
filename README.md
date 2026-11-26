@@ -14,7 +14,7 @@ npm i dsh-progress-union          # 走 npm 版本号
 # 或本地开发：pnpm --dir <profile> add file:<repo>/dsh-progress-union-<ver>.tgz
 ```
 
-装好后在 profile 的 `dsh.profile.bundles` 里挂上 `dsh-progress-union`，重启宿主加载；设置面在「设置 → 插件 → progress-union」。
+装好后在 profile 的 `dsh.profile.bundles` 里挂上 `dsh-progress-union`，重启宿主加载；**所有配置面在「设置 → 插件 → dsh-progress-union」**（宿主按插件导出的 `Config` 逐叶子 `.volatile()` 自动生成表单，改完即生效、无需重启）。
 
 ## 它解决什么
 
@@ -118,27 +118,30 @@ observer:
 
 ## 辅助 LLM（审查/监视进度）
 
-观察者默认是**规则版（零 LLM 费用）**。可选的辅助模型会把"清单 + 最近输出 + 最近动作 + 最近改动"交给一个小模型做审查，只让它校准 `current / next / percent`：
+观察者默认是**规则版（零 LLM 费用）**。可选的辅助模型会把"清单 + 最近输出 + 最近动作 + 最近改动"交给一个小模型做审查：
+
+**配置位置：设置 → 插件 → dsh-progress-union**（字段同下；也可在 profile 的 `cordis.patch.yml` 里写 `config:` 作部署面默认值）。
 
 ```yaml
 assistant:
-  mode: direct            # '' 关（默认）| 'direct'
-  baseUrl: http://127.0.0.1:8000/v1
-  model: qwen2.5-3b       # 小模型即可
-  apiKey: ''              # 可选；快照只回布尔 hasApiKey
-  timeoutMs: 20000
+  mode: ''                # '' 关（默认）| 'registered' | 'direct'
+  provider: local-35b     # registered：Settings→模型 里的 provider 名（走宿主 llm.stream，免密钥）
+  model: qwen2.5-3b       # registered/direct 共用的模型 id
+  baseUrl: http://127.0.0.1:8000/v1   # direct 专用
+  apiKey: ''              # direct 专用；快照只回布尔 hasApiKey
+  authority: both         # slots | rounds | both
   minIntervalMs: 90000    # 两次审查的最小间隔
-  maxCallsPerTurn: 1      # 每回合至多一次
   autoApply: true         # false = 只记录建议不落地
 ```
 
+- **两条通道**：`registered` 走宿主 `llm.stream`（复用 Settings→模型 里已配好的 provider/model，无需另存密钥；system prompt 走 `options.system`，输入走 `ContentBlock[]`）；`direct` 直连自建 OpenAI 兼容端点；
 - **触发**：板有未完成项，且主模型滞后（`maxIdleSteps`/`maxIdleMs` 超阈值）——与催办/自补同一时机，不额外打扰；
-- **硬约束**：只改 `current/next/percent`；不存在的 id 丢弃；**不增删任务、不改 title/status**；每回合配额 + 最小间隔双节流；失败静默（`assistantError` 入观察块，不阻断板与主流程）；
+- **职责**：按 `authority` 可增删改槽位（≤8 条/次，用户未确认改动优先）并产出轮次草案（仅建议，判断权归主模型）；每回合配额 + 最小间隔双节流；失败静默（`assistantError` 入观察块，不阻断板与主流程）；
 - **产出**：落地项 `updatedBy=assistant`；审查结论一行进观察块：`助手审查：<note>`；
-- **端点建议**：优先本地/局域网自建 OpenAI 兼容端点（Ollama、LM Studio、自建 llama.cpp、vLLM、SGLang、Strata、Ninfer 等），也就是面板首区块那条提示的含义；
-- 面板侧边栏与全展开两个视图的**第一个内容块**都显示该通道状态（未启用/已启用 + 端点 + 频率），即本插件的"费用提示永远第一"落点。
+- **端点建议**：`direct` 优先本地/局域网自建 OpenAI 兼容端点（Ollama、LM Studio、自建 llama.cpp、vLLM、SGLang、Strata、Ninfer 等）；
+- 侧边栏与全展开两个视图的**第一个内容块**只做只读状态展示（未启用/已启用 + 端点 + 频率）并指向设置页，**不再放编辑表单**——配置单挂在宿主设置面，避免两处写同一命名空间。
 
-**为什么不做 host 通道**：union 是纯宿主插件，没有取得宿主 chat 调用的公开面；`direct` 是唯一不靠内部 API 的可靠路径，也正好对应"本地小模型"的推荐用法。
+**为什么不做 host 通道**：union 自身不直接持有宿主 chat 会话；`registered` 只借 `llm.stream` 一次性调用（不走主对话），`direct` 则完全不依赖宿主内部 API，两路都只拿回一段 JSON，不触碰会话历史。
 
 ## 明确不做
 
@@ -155,5 +158,5 @@ assistant:
 ## 开发与测试
 
 ```bash
-npm test   # node --test test/*.test.mjs（47 用例，纯 mock ctx，无需宿主进程）
+npm test   # node --test test/*.test.mjs（48 用例，纯 mock ctx，无需宿主进程）
 ```

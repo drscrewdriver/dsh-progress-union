@@ -18,23 +18,8 @@ window.__ModuleLoader__.load({
       window.dispatchEvent(new CustomEvent(PROGRESS_EVENT, { detail: { sessionId, snapshot } }))
     }
 
-    // 辅助 LLM 可编辑设置：settingsScope.bind({namespace})（0.1.7+）或 configForms.get(ns)（旧）。
-    // 通过 ctx.inject 软注入，拿不到时 scopeOf 恒 undefined，面板退化为只读提示。
-    let scopeOf = undefined
-    function installSettingsScope(ctx) {
-      const tryInject = (deps, pick) => {
-        try {
-          ctx.inject(deps, (scope) => {
-            const src = scope && pick(scope)
-            if (src === undefined) return
-            if (typeof src.bind === 'function') scopeOf = (ns) => src.bind({ namespace: ns })
-            else if (typeof src.get === 'function') scopeOf = (ns) => src.get(ns)
-          })
-        } catch (_err) {}
-      }
-      tryInject(['settingsScope'], (s) => s.settingsScope)
-      tryInject(['configForms'], (s) => s.configForms)
-    }
+    // 辅助 LLM 的配置面不在客户端：宿主设置页（设置 → 插件 → dsh-progress-union）
+    // 按插件导出的 Config 逐叶子 .volatile() 自动生成表单，本面板只做只读状态展示。
 
     /*
      * DeepSeek list prices in CNY per 1M tokens (api-docs.deepseek.com,
@@ -228,25 +213,8 @@ window.__ModuleLoader__.load({
       llmOn: '已启用',
       llmOff: '未启用：观察者为规则版（零 LLM 费用）。启用后由辅助模型管理任务槽位、产出续轮建议。',
       llmAuto: '，自动落地',
-      llmHint: '选「已注册」复用 Settings→模型里的 provider/model（走宿主，免密钥）；或「直连」自建 OpenAI 兼容端点。仅滞后时触发，每回合至多一次。助手可增删改槽位并产出轮次草案（仅供参考），判断权归主模型。',
-      llmMode: '模式',
-      llmModeOff: '关闭',
-      llmModeRegistered: '已注册 provider',
-      llmModeDirect: '直连端点',
-      llmProvider: '提供方',
-      llmModel: '模型',
-      llmBaseUrl: '端点地址',
-      llmApiKey: 'API 密钥',
-      llmAuthority: '权限',
-      llmAuthoritySlots: '管理槽位',
-      llmAuthorityRounds: '轮次草案',
-      llmAuthorityBoth: '两者',
-      llmPickModel: '选择模型…',
-      llmNoProviders: 'Settings→模型 里没有已配置的 provider/model',
-      llmSave: '保存',
-      llmSaved: '已保存',
-      llmSaveFail: '保存失败',
-      llmResult: '结果',
+      llmHint: '配置在「设置 → 插件 → dsh-progress-union」：mode 选 registered 复用 Settings→模型 里的 provider/model（走宿主，免密钥），或 direct 直连自建 OpenAI 兼容端点。仅滞后时触发，每回合至多一次。助手可增删改槽位并产出轮次草案（仅供参考），判断权归主模型。',
+      llmSettingsHint: '在设置页修改',
       etaLeft: '预计剩',
       etaOver: '已超预估',
       staleTag: '中断',
@@ -356,25 +324,8 @@ window.__ModuleLoader__.load({
       llmOn: 'Enabled',
       llmOff: 'Disabled: the observer is rule-based (zero LLM cost). When enabled, the assistant manages task slots and produces round suggestions.',
       llmAuto: ', auto-applied',
-      llmHint: 'Use "Registered" to reuse a provider/model from Settings → Models (via host, no API key needed), or "Direct" for a self-hosted OpenAI-compatible endpoint. Triggered only while overdue, at most once per turn. The assistant may add/edit/remove slots and emit round suggestions (advice only); the main model decides.',
-      llmMode: 'Mode',
-      llmModeOff: 'Off',
-      llmModeRegistered: 'Registered provider',
-      llmModeDirect: 'Direct endpoint',
-      llmProvider: 'Provider',
-      llmModel: 'Model',
-      llmBaseUrl: 'Endpoint URL',
-      llmApiKey: 'API key',
-      llmAuthority: 'Authority',
-      llmAuthoritySlots: 'Manage slots',
-      llmAuthorityRounds: 'Round draft',
-      llmAuthorityBoth: 'Both',
-      llmPickModel: 'Pick a model…',
-      llmNoProviders: 'No configured provider/model under Settings → Models',
-      llmSave: 'Save',
-      llmSaved: 'Saved',
-      llmSaveFail: 'Save failed',
-      llmResult: 'Result',
+      llmHint: 'Configure in Settings → Plugins → dsh-progress-union: set mode=registered to reuse a provider/model from Settings → Models (via host, no API key), or mode=direct for a self-hosted OpenAI-compatible endpoint. Triggered only while overdue, at most once per turn. The assistant may add/edit/remove slots and emit round suggestions (advice only); the main model decides.',
+      llmSettingsHint: 'Change in Settings',
       etaLeft: '~',
       etaOver: 'over by',
       staleTag: 'idle',
@@ -564,10 +515,6 @@ window.__ModuleLoader__.load({
       .pb-llm-title { font-size: 12px; font-weight: 650; }
       .pb-llm-line { margin-top: 4px; font-size: 12px; line-height: 1.5; }
       .pb-llm-hint { margin-top: 4px; font-size: 11px; line-height: 1.5; opacity: .75; }
-      .pb-llm-editor { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(217,119,6,.25); display: grid; gap: 6px; }
-      .pb-llm-field { display: flex; align-items: center; gap: 8px; font-size: 11px; }
-      .pb-llm-field > span { flex: 0 0 72px; opacity: .8; }
-      .pb-llm-field select, .pb-llm-field input { flex: 1; min-width: 0; padding: 3px 6px; font-size: 11px; border: 1px solid rgba(128,128,128,.4); border-radius: 4px; background: transparent; color: inherit; }
       .pb-header-btn {
         display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
         border: 1px solid transparent; border-radius: 6px; background: transparent;
@@ -1488,105 +1435,25 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 只读状态行：配置面归宿主设置页（设置 → 插件 → dsh-progress-union），
+    // 侧边栏不再放编辑表单（避免两处写同一命名空间）。
     function LlmAssistNotice(props) {
       const t = makeT(props)
       const a = props.assistant
-      const cfg = props.assistantCfg
-      const [open, setOpen] = useState(false)
-      const [mode, setMode] = useState((a && a.mode) || '')
-      const [provider, setProvider] = useState((a && a.provider) || '')
-      const [model, setModel] = useState((a && a.model) || '')
-      const [baseUrl, setBaseUrl] = useState((a && a.baseUrl) || '')
-      const [apiKey, setApiKey] = useState('')
-      const [authority, setAuthority] = useState((a && a.authority) || 'both')
-      const [status, setStatus] = useState('')
       if (!a) return null
       const on = a.enabled === true
-      const providers = cfg && cfg.available ? cfg.providers() : []
-      const selectedProvider = providers.find((p) => p.name === provider)
-      const models = selectedProvider ? selectedProvider.models : []
-
-      const save = async () => {
-        if (!cfg || !cfg.available) { setStatus(t('llmSaveFail')); return }
-        const patch = { mode, provider, model, baseUrl, authority, apiKey }
-        try {
-          await cfg.save(patch)
-          setStatus(t('llmSaved'))
-          if (apiKey) setApiKey('')
-        } catch (_err) {
-          setStatus(t('llmSaveFail'))
-        }
-      }
-
-      const select = (label, value, onChange, options) =>
-        h(
-          'label',
-          { className: 'pb-llm-field' },
-          h('span', null, label),
-          h(
-            'select',
-            { value, onChange: (e) => onChange(e.target.value) },
-            options.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label)),
-          ),
-        )
-
+      const every = Math.max(1, Math.round((a.minIntervalMs || 0) / 60000))
       const line = on
         ? (a.mode === 'registered'
-            ? `${t('llmOn')}：${a.provider} · ${a.model}（≤${Math.max(1, Math.round((a.minIntervalMs || 0) / 60000))} min/次${a.autoApply ? t('llmAuto') : ''}）`
-            : `${t('llmOn')}：${a.baseUrl} · ${a.model}（≤${Math.max(1, Math.round((a.minIntervalMs || 0) / 60000))} min/次${a.autoApply ? t('llmAuto') : ''}）`)
+            ? `${t('llmOn')}：${a.provider} · ${a.model}（≤${every} min/次${a.autoApply ? t('llmAuto') : ''}）`
+            : `${t('llmOn')}：${a.baseUrl} · ${a.model}（≤${every} min/次${a.autoApply ? t('llmAuto') : ''}）`)
         : t('llmOff')
-
       return h(
         'div',
         { className: on ? 'pb-llm' : 'pb-llm pb-llm-off' },
         h('div', { className: 'pb-llm-title' }, t('llmTitle')),
         h('div', { className: 'pb-llm-line' }, line),
         h('div', { className: 'pb-llm-hint' }, t('llmHint')),
-        h('button', { type: 'button', className: 'pb-side-link', style: { marginTop: '4px' }, onClick: () => setOpen((v) => !v) }, open ? '▾' : '▸'),
-        open
-          ? h(
-              'div',
-              { className: 'pb-llm-editor' },
-              select(t('llmMode'), mode, setMode, [
-                { value: '', label: t('llmModeOff') },
-                { value: 'registered', label: t('llmModeRegistered') },
-                { value: 'direct', label: t('llmModeDirect') },
-              ]),
-              mode === 'registered'
-                ? h(
-                    'div',
-                    null,
-                    providers.length === 0
-                      ? h('div', { className: 'pb-llm-hint' }, t('llmNoProviders'))
-                      : select(t('llmProvider'), provider, (v) => { setProvider(v); setModel('') }, [
-                          { value: '', label: t('llmPickModel') },
-                          ...providers.map((p) => ({ value: p.name, label: p.name })),
-                        ]),
-                    models.length > 0
-                      ? select(t('llmModel'), model, setModel, [
-                          { value: '', label: t('llmPickModel') },
-                          ...models.map((m) => ({ value: m, label: m })),
-                        ])
-                      : null,
-                  )
-                : mode === 'direct'
-                  ? h(
-                      'div',
-                      null,
-                      h('label', { className: 'pb-llm-field' }, h('span', null, t('llmBaseUrl')), h('input', { type: 'text', value: baseUrl, onChange: (e) => setBaseUrl(e.target.value) })),
-                      h('label', { className: 'pb-llm-field' }, h('span', null, t('llmModel')), h('input', { type: 'text', value: model, onChange: (e) => setModel(e.target.value) })),
-                      h('label', { className: 'pb-llm-field' }, h('span', null, t('llmApiKey')), h('input', { type: 'password', value: apiKey, placeholder: a.hasApiKey ? '••••••' : '', onChange: (e) => setApiKey(e.target.value) })),
-                    )
-                  : null,
-              select(t('llmAuthority'), authority, setAuthority, [
-                { value: 'both', label: t('llmAuthorityBoth') },
-                { value: 'slots', label: t('llmAuthoritySlots') },
-                { value: 'rounds', label: t('llmAuthorityRounds') },
-              ]),
-              h('button', { type: 'button', className: 'pb-btn pb-btn-primary', style: { marginTop: '6px' }, onClick: () => void save() }, t('llmSave')),
-              status ? h('span', { className: 'pb-llm-hint', style: { marginLeft: '8px' } }, status) : null,
-            )
-          : null,
       )
     }
 
@@ -1743,7 +1610,7 @@ window.__ModuleLoader__.load({
             ),
           ),
           readError ? h('div', { className: 'pb-side-error' }, `${t('readError')}${readError}`) : null,
-          h(LlmAssistNotice, { assistant: snapshot?.assistant, t: props.t, assistantCfg: props.assistantCfg }),
+          h(LlmAssistNotice, { assistant: snapshot?.assistant, t: props.t }),
           actionError ? h('div', { className: 'pb-side-error' }, `${t('saveError')}${actionError}`) : null,
           usageView
             ? h(
@@ -2163,7 +2030,7 @@ window.__ModuleLoader__.load({
               ),
             ),
           ),
-          h(LlmAssistNotice, { assistant: snapshot?.assistant, t: props.t, assistantCfg: props.assistantCfg }),
+          h(LlmAssistNotice, { assistant: snapshot?.assistant, t: props.t }),
           snapshot?.enabled === false
             ? h(
                 'div',
@@ -2301,7 +2168,6 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'locale', 'layout', 'sidebarRight', 'sidebarRightTabs', 'sessions'],
       apply(ctx) {
-        installSettingsScope(ctx)
         ctx.effect(
           () =>
             ctx.locale.register(NS, {
@@ -2312,46 +2178,6 @@ window.__ModuleLoader__.load({
         )
 
         const t = ctx.locale.bind(NS)
-        // 辅助 LLM 配置读写面：面板用它在 settings 里改 assistant（运行时生效，无需重启）。
-        const assistantCfg = {
-          available: () => Boolean(scopeOf),
-          // llm-pi-ai 里的 provider/model 列表（供下拉）
-          providers() {
-            if (!scopeOf) return []
-            try {
-              const scope = scopeOf('llm-pi-ai')
-              const snap = scope && typeof scope.getSnapshot === 'function' ? scope.getSnapshot() : null
-              const value = snap && (snap.value !== undefined ? snap.value : snap)
-              const providers = value && Array.isArray(value.providers) ? value.providers : []
-              return providers.map((p) => ({
-                name: String(p && (p.name || p.id || p.provider) || ''),
-                models: Array.isArray(p && p.models)
-                  ? p.models.map((m) => String((m && (m.id || m.name)) || '')).filter(Boolean)
-                  : [],
-              })).filter((p) => p.name)
-            } catch (_err) {
-              return []
-            }
-          },
-          // progress-union settings 里当前的 assistant 配置
-          current() {
-            if (!scopeOf) return null
-            try {
-              const scope = scopeOf('progress-union')
-              const snap = scope && typeof scope.getSnapshot === 'function' ? scope.getSnapshot() : null
-              const value = snap && (snap.value !== undefined ? snap.value : snap)
-              return value && typeof value === 'object' && value.assistant ? value.assistant : null
-            } catch (_err) {
-              return null
-            }
-          },
-          async save(patch) {
-            if (!scopeOf) throw new Error('settings unavailable')
-            const scope = scopeOf('progress-union')
-            if (!scope || typeof scope.set !== 'function') throw new Error('scope.set unavailable')
-            await scope.set('assistant', patch)
-          },
-        }
         const wakeAgent = (sessionId, text) => {
           try {
             const binding = ctx.sessions.binding(sessionId)
@@ -2448,7 +2274,6 @@ window.__ModuleLoader__.load({
                     openFullPanel,
                     wakeAgent,
                     usage: usageApi,
-                    assistantCfg,
                   }),
                 },
                 ProgressSidePanel,
@@ -2465,7 +2290,7 @@ window.__ModuleLoader__.load({
                   name: 'main',
                   key: PANEL_ID,
                   locale: NS,
-                  inject: () => ({ wakeAgent, usage: usageApi, assistantCfg }),
+                  inject: () => ({ wakeAgent, usage: usageApi }),
                 },
                 ProgressPanel,
               ),

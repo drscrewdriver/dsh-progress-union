@@ -21,20 +21,21 @@ import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
-// 设置页可见性：宿主 settings.describe() 只看插件导出的 Config（带 .volatile() 的字段
-// 才会生成可编辑表单）。导出它，progress-union 才会出现在「设置 → 插件」里，客户端
-// scopeOf('progress-union') 也才拿得到命名空间做运行时读写。
+// 设置页可见性：0.1.7+ 宿主把 composition entry 当设置节，直接按导出的 Config
+// **逐叶子**的 .volatile() 标记生成「设置 → 插件」里的表单，并把 volatile 字段以
+// live ref（带 .get()）注入 apply。整对象套一层 .volatile() 不生成字段表单（面板
+// 只会空空如也），所以必须每个叶子单独标——与 dsh-llm-openai-completions 同式。
 export const Config = z.object({
   assistant: z.object({
-    mode: z.union(['', 'registered', 'direct']).default(''),
-    provider: z.string().default(''),
-    model: z.string().default(''),
-    baseUrl: z.string().default(''),
-    apiKey: z.string().role('secret').default(''),
-    authority: z.union(['slots', 'rounds', 'both']).default('both'),
-    minIntervalMs: z.number().step(1000).min(0).default(90000),
-    autoApply: z.boolean().default(true),
-  }).default({}).volatile(),
+    mode: z.union(['', 'registered', 'direct']).default('').volatile(),
+    provider: z.string().default('').volatile(),
+    model: z.string().default('').volatile(),
+    baseUrl: z.string().default('').volatile(),
+    apiKey: z.string().role('secret').default('').volatile(),
+    authority: z.union(['slots', 'rounds', 'both']).default('both').volatile(),
+    minIntervalMs: z.number().step(1000).min(0).default(90000).volatile(),
+    autoApply: z.boolean().default(true).volatile(),
+  }).default({}),
 })
 
 // —— 路由与存储标识 ——
@@ -518,21 +519,37 @@ const DEFAULT_CONFIG = {
 }
 
 // .volatile() 字段在 0.1.7+ 宿主以 live ref（带 .get()）传入，旧宿主为普通值。
-function readVolatile(value, fallback) {
+function unwrapLive(value) {
   if (value !== null && typeof value === 'object' && typeof value.get === 'function') {
     const snap = value.get()
-    return snap === undefined ? fallback : snap
+    return snap === undefined ? undefined : snap
   }
-  return value ?? fallback
+  return value === undefined || value === null ? undefined : value
+}
+
+function readVolatile(value, fallback) {
+  const v = unwrapLive(value)
+  return v === undefined ? fallback : v
 }
 
 export async function apply(ctx, config) {
   const cfg = Object.assign({}, DEFAULT_CONFIG, config && typeof config === 'object' ? config : {})
   cfg.observer = Object.assign({}, DEFAULT_CONFIG.observer, cfg.observer && typeof cfg.observer === 'object' ? cfg.observer : {})
-  // assistant 是 volatile 字段：保留原始 ref，每次读取时解包（设置面板改了立即生效）。
+  // assistant 的每个字段都是 volatile：保留原始 ref（整对象或逐叶子皆可），
+  // 每次读取时解包，设置页改完下一次审查即生效，无需重启。
   const assistantRaw = config && typeof config === 'object' ? config.assistant : undefined
-  const unwrappedAssistant = readVolatile(assistantRaw, {})
-  cfg.assistant = Object.assign({}, DEFAULT_CONFIG.assistant, unwrappedAssistant && typeof unwrappedAssistant === 'object' ? unwrappedAssistant : {})
+  function assistantNow() {
+    const base = DEFAULT_CONFIG.assistant
+    const raw = unwrapLive(assistantRaw)
+    if (!isObject(raw)) return { ...base }
+    const out = { ...base }
+    for (const key of Object.keys(base)) {
+      const v = unwrapLive(raw[key])
+      if (v !== undefined) out[key] = v
+    }
+    return out
+  }
+  cfg.assistant = assistantNow()
   const now = () => Date.now()
 
   // —— 状态容器 ——
@@ -575,11 +592,12 @@ export async function apply(ctx, config) {
     } catch (_err) {}
     return undefined
   }
-  // 运行时配置：settings 里的 assistant 覆盖静态 cfg.assistant（面板改了立即生效）。
+  // 运行时配置：设置页（volatile live ref）优先，settings 命名空间作补充覆盖。
   function liveAssistant() {
+    const current = assistantNow()
     const section = readAssistantSection()
     const fromSettings = section && isObject(section.value) && isObject(section.value.assistant) ? section.value.assistant : undefined
-    return fromSettings ? { ...cfg.assistant, ...fromSettings } : cfg.assistant
+    return fromSettings ? { ...current, ...fromSettings } : current
   }
 
   // ==========================================================================
@@ -1478,18 +1496,26 @@ ${reason}。本回合开始前先用 progress_update 处理进度板：用户这
     try {
       let raw = ''
       if (a.mode === 'registered') {
-        // 宿主 llm.stream：把 chunk 拼成正文（兼容 content/text 字段与 delta 形态）。
+        // 应主 llm.stream 契约：system 必须走 options.system（adapter 才把它映射到
+        // provider 的 system 槽）；写进 messages 的 role:'system' 会被忽略 → 请求实际
+        // 没有 system，DeepSeek 回落到内置 "You are a helpful assistant." 并把它当正文
+        // 吐回来。content 也必须是 ContentBlock[]（块数组）而非裸字符串。
+        // 参考 dsh-media-lens/src/providers/registered.ts 的调用形状。
         const stream = llm.stream({
           provider: String(a.provider),
           model: String(a.model),
-          messages: [{ role: 'system', content: ASSISTANT_SYSTEM }, { role: 'user', content: lines.join('\n') }],
+          system: ASSISTANT_SYSTEM,
+          messages: [{ role: 'user', content: [{ type: 'text', text: lines.join('\n') }] }],
+          signal: controller.signal,
         })
         for await (const chunk of stream) {
-          if (chunk && typeof chunk.content === 'string') raw += chunk.content
-          else if (chunk && typeof chunk.text === 'string') raw += chunk.text
-          else if (chunk && chunk.delta && typeof chunk.delta === 'string') raw += chunk.delta
           if (controller.signal.aborted) break
+          if (chunk && chunk.type === 'text-delta' && typeof chunk.text === 'string') raw += chunk.text
+          else if (chunk && chunk.type === 'finish' && chunk.reason && chunk.reason.kind !== 'stop' && chunk.reason.kind !== 'max-tokens') {
+            throw new Error(`assistant finish: ${chunk.reason.kind}`)
+          }
         }
+        if (raw.trim() === '') throw new Error('assistant-empty')
       } else {
         const base = String(a.baseUrl || '').replace(/\/+$/, '')
         const response = await fetch(`${base}/chat/completions`, {
