@@ -58,6 +58,13 @@ const STALE_MS = 10 * 60 * 1000
 const KICKOFF_COOLDOWN_MS = 60 * 1000
 const STATUSES = new Set(['todo', 'doing', 'done', 'blocked'])
 
+// —— /progress-goal 迷你目标域常量（自建，不复用官方 goals 域）——
+const GOAL_PHASES = new Set(['idle', 'active', 'paused', 'blocked', 'complete'])
+const GOAL_SOURCE_KIND = 'plugin:progress-goal-goal' // producer-owned source kind（身份栅栏用）
+const GOAL_DEFAULT_MAX_ROUNDS = 256
+const GOAL_BLOCK_STREAK = 3 // blocked 连续 N 轮同一条件才落 phase（对齐 tool-goal 默认）
+const GOAL_TAG = '<progress_goal_round>'
+
 // —— widget 侧时间与统计（DSH_HOME 与鲸程共文件，样本不迁移）——
 const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
 const PROGRESS_FILE = path.join(DSH_HOME, 'dsh-progress.json')
@@ -132,6 +139,25 @@ function emptyState(sessionId) {
     updatedAt: now,
     items: [],
     userChanges: [],
+    goal: emptyGoal(),
+  }
+}
+
+function newGoalId() {
+  return `goal_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+function emptyGoal() {
+  return {
+    id: newGoalId(),
+    objective: '',
+    phase: 'idle',
+    maxRounds: GOAL_DEFAULT_MAX_ROUNDS,
+    roundsStarted: 0,
+    blockedStreak: 0,
+    blockedReason: null,
+    activation: 'disarmed',
+    currentRound: 0, // 正在派发的轮次（attempt），0 表示无
   }
 }
 
@@ -605,6 +631,18 @@ export async function apply(ctx, config) {
       if (typeof item.approach !== 'string') item.approach = ''
     }
     if (typeof state.enabled !== 'boolean') state.enabled = false
+    if (!isObject(state.goal)) state.goal = emptyGoal()
+    else {
+      const g = state.goal
+      if (!GOAL_PHASES.has(g.phase)) g.phase = 'idle'
+      if (!Number.isSafeInteger(g.maxRounds) || g.maxRounds < 1) g.maxRounds = GOAL_DEFAULT_MAX_ROUNDS
+      if (!Number.isSafeInteger(g.roundsStarted) || g.roundsStarted < 0) g.roundsStarted = 0
+      if (!Number.isSafeInteger(g.blockedStreak) || g.blockedStreak < 0) g.blockedStreak = 0
+      if (g.activation !== 'armed' && g.activation !== 'disarmed') g.activation = 'disarmed'
+      if (!Number.isSafeInteger(g.currentRound) || g.currentRound < 0) g.currentRound = 0
+      if (typeof g.objective !== 'string') g.objective = ''
+      if (typeof g.id !== 'string' || !g.id) g.id = newGoalId()
+    }
     return state
   }
 
@@ -637,16 +675,8 @@ export async function apply(ctx, config) {
       storageError: storageError || null,
       items,
       summary: summarize(items),
-      // 辅助 LLM（审查/监视）的配置回声：只回非机密字段，apiKey 只回布尔
-      assistant: {
-        enabled: assistantReady(),
-        mode: cfg.assistant.mode || '',
-        baseUrl: String(cfg.assistant.baseUrl || ''),
-        model: String(cfg.assistant.model || ''),
-        hasApiKey: String(cfg.assistant.apiKey || '') !== '',
-        minIntervalMs: Number(cfg.assistant.minIntervalMs) || 0,
-        autoApply: cfg.assistant.autoApply !== false,
-      },
+      // /progress-goal 迷你目标域回声
+      goal: state.goal ? goalView(state.sessionId) : null,
       // 辅助 LLM 的配置回声：只回非机密字段，apiKey 只回布尔
       assistant: (() => {
         const a = liveAssistant()
@@ -869,6 +899,176 @@ export async function apply(ctx, config) {
       }
     })
     return { snapshot: publicSnapshot(working), changed: changed.filter(Boolean) }
+  }
+
+  // ==========================================================================
+  // A2. /progress-goal 迷你目标域（预算 / 检查 / 重试 三件套）
+  //     自建、不走官方 goals 域：避免 /goal 的 pre-step 身份校验被本插件注入污染。
+  // ==========================================================================
+
+  function goalView(sessionId) {
+    const state = ensureState(sessionId)
+    const g = state.goal
+    const summary = summarize(state.items.slice().sort((a, b) => a.order - b.order).map(itemView))
+    return {
+      objective: g.objective,
+      phase: g.phase,
+      maxRounds: g.maxRounds,
+      roundsStarted: g.roundsStarted,
+      blockedStreak: g.blockedStreak,
+      blockedReason: g.blockedReason,
+      activation: g.activation,
+      currentRound: g.currentRound,
+      board: summary,
+    }
+  }
+
+  function goalPhaseLabel(phase) {
+    return GOAL_PHASES.has(phase) ? phase : 'idle'
+  }
+
+  // 板是否全部完成（>0 项且全 done）——"检查"的真相源，避免猜消息身份。
+  function goalBoardComplete(state) {
+    return state.items.length > 0 && state.items.every((item) => item.status === 'done')
+  }
+
+  async function saveGoal(sessionId) {
+    const state = ensureState(sessionId)
+    state.updatedAt = now()
+    await persist(sessionId)
+    return state.goal
+  }
+
+  async function createGoal(sessionId, objective) {
+    const state = ensureState(sessionId)
+    if (state.goal.phase === 'active' || state.goal.phase === 'paused' || state.goal.phase === 'blocked') {
+      throw new Error(`目标当前为 ${goalPhaseLabel(state.goal.phase)}；先用 /progress-goal clear 清除，或 edit 改目标。`)
+    }
+    const clean = text(objective, 600)
+    if (!clean) throw new Error('目标内容不能为空')
+    state.goal = {
+      ...emptyGoal(),
+      objective: clean,
+      phase: 'active',
+      activation: 'armed',
+    }
+    await saveGoal(sessionId)
+    return goalView(sessionId)
+  }
+
+  async function editGoal(sessionId, objective) {
+    const state = ensureState(sessionId)
+    if (state.goal.phase === 'idle') throw new Error('没有可编辑的目标')
+    const clean = text(objective, 600)
+    if (!clean) throw new Error('目标内容不能为空')
+    state.goal.objective = clean
+    if (state.goal.phase === 'complete') {
+      state.goal.phase = 'active'
+      state.goal.activation = 'armed'
+      state.goal.roundsStarted = 0
+      state.goal.blockedStreak = 0
+      state.goal.blockedReason = null
+    }
+    await saveGoal(sessionId)
+    return goalView(sessionId)
+  }
+
+  async function setGoalBudget(sessionId, value) {
+    const state = ensureState(sessionId)
+    if (state.goal.phase === 'idle') throw new Error('没有目标可设置预算')
+    const n = finiteNumber(value)
+    if (n === undefined || !Number.isSafeInteger(n) || n < 1) throw new Error('预算必须是 ≥1 的整数')
+    state.goal.maxRounds = Math.min(n, 100000)
+    await saveGoal(sessionId)
+    return goalView(sessionId)
+  }
+
+  async function pauseGoal(sessionId) {
+    const state = ensureState(sessionId)
+    if (state.goal.phase === 'idle') throw new Error('没有可暂停的目标')
+    if (state.goal.phase !== 'active') throw new Error(`只有 active 目标可暂停（当前 ${goalPhaseLabel(state.goal.phase)}）`)
+    state.goal.phase = 'paused'
+    state.goal.activation = 'disarmed'
+    state.goal.currentRound = 0
+    await saveGoal(sessionId)
+    return goalView(sessionId)
+  }
+
+  async function resumeGoal(sessionId) {
+    const state = ensureState(sessionId)
+    if (state.goal.phase !== 'paused' && state.goal.phase !== 'blocked') {
+      throw new Error(`只有 paused/blocked 目标可恢复（当前 ${goalPhaseLabel(state.goal.phase)}）`)
+    }
+    if (state.goal.roundsStarted >= state.goal.maxRounds) {
+      state.goal.roundsStarted = 0 // 预算已耗尽时恢复 = 新的一轮预算
+    }
+    state.goal.phase = 'active'
+    state.goal.activation = 'armed'
+    state.goal.blockedStreak = 0
+    state.goal.blockedReason = null
+    await saveGoal(sessionId)
+    return goalView(sessionId)
+  }
+
+  async function clearGoal(sessionId) {
+    const state = ensureState(sessionId)
+    state.goal = emptyGoal()
+    await saveGoal(sessionId)
+    return goalView(sessionId)
+  }
+
+  // 模型每轮末调用 progress_goal_report 报状态；助手草案只作建议、不自动调这里。
+  async function applyGoalReport(sessionId, report) {
+    const state = ensureState(sessionId)
+    const g = state.goal
+    if (g.phase !== 'active') throw new Error(`目标当前为 ${goalPhaseLabel(g.phase)}，只有 active 目标可上报`)
+    if (!isObject(report)) throw new Error('上报必须是对象')
+    const status = String(report.status || '')
+    if (!['continue', 'complete', 'blocked'].includes(status)) throw new Error('status 必须是 continue/complete/blocked')
+
+    if (status === 'complete') {
+      const evidence = Array.isArray(report.evidence) ? report.evidence.filter((e) => typeof e === 'string' && e.trim()) : []
+      if (evidence.length === 0) throw new Error('complete 必须提供至少一条证据 evidence')
+      if (!goalBoardComplete(state)) throw new Error('complete 被拒：进度板尚未全部完成（先更新板再报完成）')
+      g.phase = 'complete'
+      g.activation = 'disarmed'
+      g.currentRound = 0
+      g.blockedStreak = 0
+      g.blockedReason = null
+      await saveGoal(sessionId)
+      return goalView(sessionId)
+    }
+
+    if (status === 'blocked') {
+      const reason = text(report.blocker, 400) || '未提供阻塞原因'
+      if (g.blockedReason === reason) g.blockedStreak += 1
+      else { g.blockedReason = reason; g.blockedStreak = 1 }
+      if (g.blockedStreak >= GOAL_BLOCK_STREAK) {
+        g.phase = 'blocked'
+        g.activation = 'disarmed'
+        g.currentRound = 0
+      }
+      await saveGoal(sessionId)
+      return goalView(sessionId)
+    }
+
+    // continue：确认有实质进展，清 blocked 累积，轮次计数不在这里（由驱动器派发时计）
+    g.blockedStreak = 0
+    g.blockedReason = null
+    await saveGoal(sessionId)
+    return goalView(sessionId)
+  }
+
+  function renderGoalViewText(view) {
+    const parts = [
+      `Objective: ${JSON.stringify(view.objective)}`,
+      `Status: ${goalPhaseLabel(view.phase)}`,
+      `Rounds: ${view.roundsStarted}/${view.maxRounds}`,
+      `Activation: ${view.activation}`,
+      `Board: ${view.board.done}/${view.board.total} done · ${view.board.percent}%`,
+    ]
+    if (view.blockedReason) parts.push(`Blocker: ${view.blockedReason} (streak ${view.blockedStreak}/${GOAL_BLOCK_STREAK})`)
+    return parts.join('\n')
   }
 
   // ==========================================================================
